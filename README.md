@@ -29,33 +29,14 @@ Built specifically for **penetration testing and OSINT workflows**.
 
 ---
 
-### Smart File Handling
-
-Handles real-world enterprise document hosting patterns:
-
-- NetSuite
-- SharePoint / OneDrive
-- AWS S3 / CloudFront
-- Google Drive / Docs
-- Salesforce
-
----
-
 ### LinkedIn Email Enumeration Mode
 
 - Uses Google-indexed LinkedIn results (no scraping)
 - Extracts **FirstName + LastName**
-- Normalizes:
-  - Capitalization
-  - Accents (`José → Jose`)
-  - Prefixes / suffixes (`Dr`, `Jr`, etc.)
 - Generates email formats
 
 Supported placeholders:
-- `{first}`
-- `{last}`
-- `{f}`
-- `{l}`
+- `{first}`, `{last}`, `{f}`, `{l}`
 
 ---
 
@@ -67,7 +48,7 @@ cd SirPapiSearch
 ```
 Install dependencies:
 ```bash
-python3 -m pip install serpapi requests google-search-results pypdf python-docx openpyxl python-pptx olefile
+python3 -m pip install serpapi requests pypdf python-docx openpyxl python-pptx olefile
 ```
 
 ## API Key Configuration
