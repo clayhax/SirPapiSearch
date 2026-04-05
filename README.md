@@ -75,7 +75,7 @@ python3 -m pip install requests google-search-results pypdf python-docx openpyxl
 ```
 
 ## API Key Configuration
-* register and grab your SerpAPI key https://serpapi.com/
+* Register and grab your SerpAPI key https://serpapi.com/
 * SirPapiSearch supports three methods (priority order):
 
   - `--api-key`
@@ -109,10 +109,4 @@ clayhax
 
 ---
 
-## ⭐ Support
-
-If you find this tool useful:
-
-* Star the repo
-* Report issues
-* Contribute or tag me @0xclayhax on twitter with your ideas/suggestions to add
+* Comments, suggestions, and improvements are always welcome. Be sure to follow @0xclayhax on Twitter for the latest updates.
