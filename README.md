@@ -16,8 +16,7 @@ Built specifically for **penetration testing and OSINT workflows**.
 
 - Searches Google via SerpAPI using domain-based dorks
 - Supports file types:
-  - `pdf`, `docx`, `xlsx`, `pptx`, `doc`, `xls`
-  - Optional: `txt`, `csv`
+  - `pdf`, `docx`, `xlsx`, `pptx`, `doc`, `xls`, `txt`, `csv`
 - Extracts:
   - Author, Title, Creator, Producer
   - Application, Company, LastModifiedBy
@@ -25,6 +24,8 @@ Built specifically for **penetration testing and OSINT workflows**.
   - Internal path indicators
   - File hashes (SHA256)
   - High-signal findings (emails, usernames, keywords)
+- Streamed downloads (no disk writes)
+- Outputs file URLs to `URLs.txt` and extracted metadata to `{companyname}-Metadata.csv` by default
 
 ---
 
@@ -37,11 +38,6 @@ Handles real-world enterprise document hosting patterns:
 - AWS S3 / CloudFront
 - Google Drive / Docs
 - Salesforce
-
-Includes:
-- Query parameter extension detection (`_xt=.pdf`)
-- HTTP `Content-Type` fallback
-- Streamed downloads (no disk writes)
 
 ---
 
