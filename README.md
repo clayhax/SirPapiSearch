@@ -78,9 +78,9 @@ python3 -m pip install requests google-search-results pypdf python-docx openpyxl
 * register and grab your SerpAPI key https://serpapi.com/
 * SirPapiSearch supports three methods (priority order):
 
-- `--api-key`
-- `SERPAPI_KEY` environment variable 
-- Hardcoded fallback in script
+  - `--api-key`
+  - `SERPAPI_KEY` environment variable 
+  - Hardcoded fallback in script
 
 ---
 
