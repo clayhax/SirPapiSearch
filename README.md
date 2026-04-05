@@ -8,6 +8,11 @@ SirPapiSearch is a SerpAPI-powered OSINT tool designed to automate:
 
 Built specifically for **penetration testing and OSINT workflows**.
 
+<p align="center">
+  <img src="screenshots/SirPapiSearch-demo.png" width="900">
+  <img src="screenshots/SirPapiSearch-demo-cont.png" width="900">
+</p>
+
 ---
 
 ## Features
