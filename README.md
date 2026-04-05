@@ -33,7 +33,7 @@ Built specifically for **penetration testing and OSINT workflows**.
 
 Handles real-world enterprise document hosting patterns:
 
-- NetSuite (`media.nl?...&_xt=.pdf`)
+- NetSuite
 - SharePoint / OneDrive
 - AWS S3 / CloudFront
 - Google Drive / Docs
@@ -67,7 +67,7 @@ cd SirPapiSearch
 ```
 Install dependencies:
 ```bash
-python3 -m pip install requests google-search-results pypdf python-docx openpyxl python-pptx olefile
+python3 -m pip install serpapi requests google-search-results pypdf python-docx openpyxl python-pptx olefile
 ```
 
 ## API Key Configuration
