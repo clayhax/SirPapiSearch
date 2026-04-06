@@ -276,11 +276,6 @@ def safe_filename_from_url(url: str) -> str:
     return name or "unknown"
 
 
-#def guess_ext(url: str) -> str:
-#    fn = safe_filename_from_url(url)
-#    _, ext = os.path.splitext(fn)
-#    return ext.lower().lstrip(".")
-
 def guess_ext(url: str) -> str:
     parsed = urlparse(url)
 
