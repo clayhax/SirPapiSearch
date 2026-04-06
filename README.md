@@ -30,7 +30,7 @@ Built specifically for **penetration testing and OSINT workflows**.
   - File hashes (SHA256)
   - High-signal findings (emails, usernames, keywords)
 - Streamed downloads (no disk writes)
-- Outputs file URLs to `URLs.txt` and extracted metadata to `{companyname}-Metadata.csv` by default
+- Outputs file URLs to `URLs.txt` and extracted metadata to `domain-Metadata.csv` by default
 
 ---
 
