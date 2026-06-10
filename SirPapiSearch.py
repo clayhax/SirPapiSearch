@@ -8,9 +8,14 @@ import hashlib
 import unicodedata
 from dataclasses import dataclass, asdict
 from io import BytesIO
-from urllib.parse import urlparse, unquote, parse_qs
-
+from urllib.parse import urlparse, unquote, parse_qs, urljoin
+try:
+    from bs4 import BeautifulSoup
+except Exception:
+    BeautifulSoup = None
 import requests
+import zipfile
+import logging
 from serpapi import search
 
 def print_banner():
@@ -22,7 +27,7 @@ def print_banner():
 |____/|_|_|  |_|   \__,_| .__/|_|____/ \___|\__,_|_|  \___|_| |_|
                         |_|                                      
 
-        SirPapiSearch v3.0 | by clayhax
+        SirPapiSearch v3.1 | by clayhax
 """
     print(banner)
 
@@ -37,6 +42,7 @@ try:
     from pypdf import PdfReader
 except Exception:
     PdfReader = None
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 try:
     from docx import Document
@@ -77,6 +83,24 @@ KEYWORDS = [
     "authorization", "bearer",
     "private key", "ssh-rsa", "BEGIN PRIVATE KEY", "BEGIN RSA PRIVATE KEY",
     "connectionstring", "jdbc:", "odbc", "ldap", "saml",
+]
+
+DOCUMENT_PATHS = [
+    "/documents",
+    "/forms",
+    "/resources",
+    "/downloads",
+    "/policies",
+    "/board",
+    "/departments",
+    "/staff",
+    "/media",
+    "/files",
+    "/directory",
+    "/publications",
+    "/public-notices",
+    "/agendas",
+    "/minutes",
 ]
 
 
@@ -323,15 +347,25 @@ PLATFORM_PATTERNS = [
         r"/file-asset/",
         r"\.my\.salesforce\.com",
     ]),
+    ("Thrillshare/Apptegy", [
+        r"files-backend\.assets\.thrillshare\.com",
+        r"\b5il\.co\b",
+        r"apptegy",
+    ]),
+    ("Finalsite", [
+        r"finalsite\.net",
+        r"fs\.resource",
+        r"resources\.finalsite\.net",
+    ]),
+    ("Edlio", [
+        r"edlio\.com",
+        r"edl\.io",
+    ]),
+    ("CivicPlus", [
+        r"civicplus",
+        r"civicclerk",
+    ]),
 ]
-
-def detect_platform(url: str) -> str:
-    u = url.lower()
-    for platform, patterns in PLATFORM_PATTERNS:
-        for pat in patterns:
-            if re.search(pat, u, re.IGNORECASE):
-                return platform
-    return ""
 
 def normalize_dt(dt) -> str:
     if not dt:
@@ -472,6 +506,191 @@ def http_fetch(url: str, timeout: int, max_bytes: int, user_agent: str):
 
         content = buf.getvalue()
         return content, ct, str(total), lm, etag
+        
+def discover_document_pages(domain, user_agent):
+    discovered = set()
+
+    for path in DOCUMENT_PATHS:
+        url = f"https://{domain}{path}"
+
+        try:
+            r = requests.get(
+                url,
+                headers={"User-Agent": user_agent},
+                timeout=15,
+                allow_redirects=True
+            )
+
+            if r.status_code == 200:
+                discovered.add(r.url)
+
+        except Exception:
+            pass
+
+    return discovered
+    
+def extract_document_links(html, base_url):
+    soup = BeautifulSoup(html, "html.parser")
+    urls = set()
+
+    for tag in soup.find_all(["a", "iframe", "link"]):
+        link = tag.get("href") or tag.get("src")
+
+        if not link:
+            continue
+
+        absolute_url = urljoin(base_url, link)
+
+        if re.search(
+            r"\.(pdf|docx?|xlsx?|pptx?|csv|txt|zip)(?:\?|#|$)",
+            absolute_url,
+            re.I
+        ):
+            urls.add(absolute_url)
+
+    return urls
+
+def extract_json_file_urls(html):
+    urls = set()
+
+    matches = re.findall(
+        r'https?://[^"\'<>\s]+?\.(?:pdf|docx?|xlsx?|pptx?|csv|txt|zip)(?:\?[^"\'<>\s]*)?',
+        html,
+        re.I
+    )
+
+    urls.update(matches)
+    return urls
+    
+def is_document_folder_link(url: str, target_domain: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+
+    return (
+        target_domain.lower() in host
+        and path.startswith("/documents/")
+        and not re.search(r"\.(pdf|docx?|xlsx?|pptx?|csv|txt|zip)(?:\?|#|$)", path, re.I)
+    )
+
+def extract_document_folder_links(html, base_url, domain):
+    folder_urls = set()
+
+    # Normal href-based extraction
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(["a"]):
+        link = tag.get("href")
+        if not link:
+            continue
+
+        absolute_url = urljoin(base_url, link)
+
+        if is_document_folder_link(absolute_url, domain):
+            folder_urls.add(absolute_url)
+
+    # Raw HTML / JS extraction for Apptegy/Thrillshare-style routes
+    raw_patterns = re.findall(
+        r'["\']?(\/documents\/[^"\'<>\s]+?\/\d+)["\']?',
+        html,
+        re.I
+    )
+
+    for path in raw_patterns:
+        absolute_url = urljoin(base_url, path)
+
+        if is_document_folder_link(absolute_url, domain):
+            folder_urls.add(absolute_url)
+
+    # Handle escaped slashes from JSON: \/documents\/parents\/supply-lists\/24538815
+    unescaped_html = html.replace("\\/", "/")
+
+    escaped_patterns = re.findall(
+        r'["\']?(\/documents\/[^"\'<>\s]+?\/\d+)["\']?',
+        unescaped_html,
+        re.I
+    )
+
+    for path in escaped_patterns:
+        absolute_url = urljoin(base_url, path)
+
+        if is_document_folder_link(absolute_url, domain):
+            folder_urls.add(absolute_url)
+
+    return folder_urls
+    
+def crawl_document_tree(start_pages, domain, user_agent, timeout, max_depth=5, sleep_s=0.25):
+    found_files = set()
+    visited_pages = set()
+    queue = [(page, 0) for page in start_pages]
+
+    while queue:
+        page, depth = queue.pop(0)
+
+        if page in visited_pages:
+            continue
+
+        if depth > max_depth:
+            continue
+
+        visited_pages.add(page)
+        print(f"[+] Crawling document folder depth={depth}: {page}")
+
+        try:
+            r = requests.get(
+                page,
+                headers={"User-Agent": user_agent},
+                timeout=timeout,
+                allow_redirects=True
+            )
+
+            if r.status_code != 200:
+                continue
+
+            html = r.text
+
+            found_files.update(extract_document_links(html, page))
+            found_files.update(extract_json_file_urls(html))
+
+            folder_links = extract_document_folder_links(
+                html=html,
+                base_url=page,
+                domain=domain
+            )
+
+            for folder_url in folder_links:
+                if folder_url not in visited_pages:
+                    queue.append((folder_url, depth + 1))
+
+            time.sleep(sleep_s)
+
+        except Exception as e:
+            print(f"[-] Failed crawling document folder {page}: {e}")
+
+    print(f"[✓] Document tree crawl visited {len(visited_pages)} pages.")
+    print(f"[✓] Document tree crawl found {len(found_files)} file URLs.")
+
+    return found_files
+    
+THRILLSHARE_DOMAINS = [
+    "files-backend.assets.thrillshare.com",
+    "5il.co",
+]
+
+def detect_platform(url: str) -> str:
+    u = url.lower()
+
+    if "thrillshare" in u:
+        return "Thrillshare"
+
+    if "5il.co" in u:
+        return "Thrillshare"
+
+    for platform, patterns in PLATFORM_PATTERNS:
+        for pat in patterns:
+            if re.search(pat, u, re.IGNORECASE):
+                return platform
+
+    return ""
 
 CONTENT_TYPE_MAP = {
     "application/pdf": "pdf",
@@ -483,6 +702,7 @@ CONTENT_TYPE_MAP = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
     "text/csv": "csv",
     "text/plain": "txt",
+    "application/zip": "zip",
 }
 
 # ---------------- Extractors ----------------
@@ -599,6 +819,30 @@ def extract_txt(content: bytes) -> dict:
 
 def extract_csv(content: bytes) -> dict:
     return findings_from_text(content)
+    
+def extract_zip(content: bytes) -> dict:
+
+    try:
+
+        with zipfile.ZipFile(BytesIO(content)) as z:
+
+            names = z.namelist()
+
+        return {
+            "Findings": f"zip_entries={len(names)}",
+            "InternalPathIndicators":
+                extract_internal_paths(
+                    {"Entries": "; ".join(names[:100])}
+                ),
+        }
+
+    except Exception as e:
+
+        return {
+            "Findings": "",
+            "InternalPathIndicators": "",
+            "Error": str(e),
+        }
 
 
 EXTRACTORS = {
@@ -611,6 +855,7 @@ EXTRACTORS = {
     # opt-in
     "txt": extract_txt,
     "csv": extract_csv,
+    "zip": extract_zip,
 }
 
 
@@ -629,9 +874,21 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
 
         for r in organic:
             link = r.get("link")
-            if link and domain in link:
-                urls.add(link)
 
+            if not link:
+                continue
+
+            parsed = urlparse(link)
+            hostname = parsed.netloc.lower()
+
+            allowed = (
+                domain.lower() in hostname
+                or bool(detect_platform(link))
+            )
+
+            if allowed:
+                urls.add(link)
+                
         time.sleep(sleep_s)
 
     return urls
@@ -689,6 +946,13 @@ def main():
             "[-] Missing SerpAPI key. Provide --api-key, set SERPAPI_KEY env var, "
             "or hardcode HARDCODED_SERPAPI_KEY in the script."
         )
+        
+    if BeautifulSoup is None:
+        print(
+            "[-] beautifulsoup4 not installed. "
+            "Document portal crawling disabled. "
+            "Install with: python3 -m pip install beautifulsoup4"
+        )
 
     # ---------------- LinkedIn Mode (only if explicitly requested) ----------------
     if args.linkedin:
@@ -737,6 +1001,24 @@ def main():
 
     for ext in types:
         all_urls |= serp_search_filetype(args.domain, ext, api_key, args.max, args.sleep)
+
+    if BeautifulSoup is not None:
+
+        document_pages = discover_document_pages(
+            args.domain,
+            args.user_agent
+        )
+
+        all_urls.update(
+            crawl_document_tree(
+                start_pages=document_pages,
+                domain=args.domain,
+                user_agent=args.user_agent,
+                timeout=args.timeout,
+                max_depth=5,
+                sleep_s=0.25
+            )
+        )
 
     sorted_urls = sorted(all_urls)
     print(f"\n[✓] Found {len(sorted_urls)} unique URLs across types: {', '.join(types)}")
