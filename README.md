@@ -2,7 +2,8 @@
 
 SirPapiSearch is a SerpAPI-powered OSINT tool designed to automate:
 
-- Public file enumeration from Google indexing
+- Public file enumeration from Google indexing and document portals
+- Recursive discovery of multi-level CMS-backed document repositories
 - Document metadata extraction (without saving files to disk)
 - LinkedIn-based name harvesting and email generation
 
@@ -22,6 +23,10 @@ Built specifically for **penetration testing and OSINT workflows**.
 - Searches Google via SerpAPI using domain-based dorks
 - Supports file types:
   - `pdf`, `docx`, `xlsx`, `pptx`, `doc`, `xls`, `txt`, `csv`
+- Discovers common document repositories
+- Recursively traverses multi-level document folders
+- Extracts document links from HTML and embedded JSON routes
+- Detects files hosted on common CMS/CDN platforms
 - Extracts:
   - Author, Title, Creator, Producer
   - Application, Company, LastModifiedBy
@@ -53,7 +58,7 @@ cd SirPapiSearch
 ```
 Install dependencies:
 ```bash
-python3 -m pip install serpapi requests pypdf python-docx openpyxl python-pptx olefile
+python3 -m pip install serpapi requests pypdf python-docx openpyxl python-pptx olefile beautifulsoup4
 ```
 
 ## API Key Configuration
