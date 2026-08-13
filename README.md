@@ -4,8 +4,8 @@ SirPapiSearch is a SerpAPI-powered OSINT tool designed to automate:
 
 - Public file enumeration from Google indexing and document portals
 - Recursive discovery of multi-level CMS-backed document repositories
-- Document metadata extraction (without saving files to disk)
-- LinkedIn-based name harvesting and email generation
+- Document metadata extraction without permanently saving files to disk
+- LinkedIn-based name discovery and email pattern generation
 
 Built specifically for **penetration testing and OSINT workflows**.
 
@@ -77,6 +77,10 @@ python3 -m pip install serpapi requests pypdf python-docx openpyxl python-pptx o
 
 ```bash
 python3 SirPapiSearch.py example.com
+```
+
+```bash
+python3 SirPapiSearch.py example.com --out-urls example.com-URLs.txt --out-csv example.com-Metadata.csv
 ```
 ## LinkedIn Mode
 

@@ -27,7 +27,7 @@ def print_banner():
 |____/|_|_|  |_|   \__,_| .__/|_|____/ \___|\__,_|_|  \___|_| |_|
                         |_|                                      
 
-        SirPapiSearch v3.1 | by clayhax
+        SirPapiSearch v3.1 | by cl4yh4x
 """
     print(banner)
 
