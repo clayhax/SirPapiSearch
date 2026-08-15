@@ -934,7 +934,7 @@ def main():
     parser.add_argument("--max-bytes", type=int, default=20_000_000, help="Max download size per file (default: 20MB)")
     parser.add_argument("--user-agent", default="Mozilla/5.0 (compatible; FileEnum/3.1)",
                         help="User-Agent for HTTP fetches")
-    parser.add_argument("--out-urls", default="URLs.txt", help="Output file for URLs (default: URLs.txt)")
+    parser.add_argument("--out-urls", default=None, help="Output file for URLs (default: <domain>-URLs.txt)")
     parser.add_argument("--out-csv", default=None, help="Output CSV file (default: <domain>-Metadata.csv)")
     args = parser.parse_args()
     print_banner()
@@ -996,6 +996,7 @@ def main():
 
     # ---------------- File Enumeration Mode (default) ----------------
     out_csv = args.out_csv or f"{args.domain}-Metadata.csv"
+    out_urls = args.out_urls or f"{args.domain}-URLs.txt"
     types = [t.strip().lower().lstrip(".") for t in args.types.split(",") if t.strip()]
     all_urls: set[str] = set()
 
@@ -1023,10 +1024,10 @@ def main():
     sorted_urls = sorted(all_urls)
     print(f"\n[✓] Found {len(sorted_urls)} unique URLs across types: {', '.join(types)}")
 
-    with open(args.out_urls, "w", encoding="utf-8") as f:
+    with open(out_urls, "w", encoding="utf-8") as f:
         for u in sorted_urls:
             f.write(u + "\n")
-    print(f"[✓] URLs saved to {args.out_urls}")
+    print(f"[✓] URLs saved to {out_urls}")
 
     fieldnames = list(MetaRow.__annotations__.keys())
     with open(out_csv, "w", newline="", encoding="utf-8") as csvfile:

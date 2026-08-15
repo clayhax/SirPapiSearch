@@ -35,7 +35,7 @@ Built specifically for **penetration testing and OSINT workflows**.
   - File hashes (SHA256)
   - High-signal findings (emails, usernames, keywords)
 - Streamed downloads (no disk writes)
-- Outputs file URLs to `URLs.txt` and extracted metadata to `domain-Metadata.csv` by default
+- Outputs file URLs to `domain-URLs.txt` and extracted metadata to `domain-Metadata.csv` by default
 
 ---
 
@@ -78,10 +78,6 @@ python3 -m pip install serpapi requests pypdf python-docx openpyxl python-pptx o
 ```bash
 python3 SirPapiSearch.py example.com
 ```
-
-```bash
-python3 SirPapiSearch.py example.com --out-urls example.com-URLs.txt --out-csv example.com-Metadata.csv
-```
 ## LinkedIn Mode
 
 ```bash
@@ -96,7 +92,7 @@ This tool is intended for **authorized security testing only**.
 
 ## 👤 Author
 
-clayhax
+cl4yh4x
 
 ---
 
