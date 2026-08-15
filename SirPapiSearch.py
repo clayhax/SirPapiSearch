@@ -18,6 +18,29 @@ import zipfile
 import logging
 from serpapi import search
 
+# ---------------- Terminal Colors ----------------
+CYAN = "\033[96m"
+WHITE = "\033[97m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
+
+def info(message):
+    print(f"{CYAN}[+]{RESET} {message}")
+
+
+def success(message):
+    print(f"{GREEN}[✓]{RESET} {message}")
+
+
+def warning(message):
+    print(f"{YELLOW}[!]{RESET} {message}")
+
+
+def error(message):
+    print(f"{RED}[-]{RESET} {message}")
+    
 def print_banner():
     banner = r"""
  ____  _      ____             _ ____                      _     
@@ -27,9 +50,10 @@ def print_banner():
 |____/|_|_|  |_|   \__,_| .__/|_|____/ \___|\__,_|_|  \___|_| |_|
                         |_|                                      
 
-        SirPapiSearch v3.1 | by cl4yh4x
 """
-    print(banner)
+    print(CYAN + banner + RESET)
+    print(WHITE + "        SirPapiSearch v3.1 | by cl4yh4x" + RESET)
+    print()
 
 # ---------------- SerpAPI Key Configuration ----------------
 # API key resolution priority:
@@ -864,7 +888,7 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
     urls = set()
 
     for start in range(0, max_results, 10):
-        print(f"[+] ({ext}) Fetching results from offset {start}")
+        info(f"({ext}) Fetching results from offset {start}")
         params = {"engine": "google", "q": q, "api_key": api_key, "start": start, "num": 10}
         results = search(params)
         organic = results.get("organic_results", [])
@@ -905,6 +929,12 @@ def main():
         default=None,
         help="SerpAPI key (overrides SERPAPI_KEY env var and HARDCODED_SERPAPI_KEY)"
     )
+    
+    parser.add_argument(
+        "--no-banner",
+        action="store_true",
+        help="Suppress the SirPapiSearch banner"
+    )
 
     # LinkedIn mode: OFF by default. When enabled, tool will ONLY run LinkedIn mode and exit.
     parser.add_argument(
@@ -937,7 +967,9 @@ def main():
     parser.add_argument("--out-urls", default=None, help="Output file for URLs (default: <domain>-URLs.txt)")
     parser.add_argument("--out-csv", default=None, help="Output CSV file (default: <domain>-Metadata.csv)")
     args = parser.parse_args()
-    print_banner()
+
+    if not args.no_banner:
+        print_banner()
 
     # Resolve API key priority:
     api_key = args.api_key or os.getenv("SERPAPI_KEY") or HARDCODED_SERPAPI_KEY
