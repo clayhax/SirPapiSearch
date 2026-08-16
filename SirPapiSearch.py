@@ -147,7 +147,7 @@ HONORIFICS = {
     "mr", "mrs", "ms", "miss", "mx", "dr", "prof", "sir", "madam", "dame",
 }
 SUFFIXES = {
-    "jr", "sr", "ii", "iii", "iv", "v", "md", "phd", "dds", "dvm", "esq", "mba", "pe",
+    "jr", "sr", "ii", "iii", "iv", "v", "md", "phd", "dds", "dvm", "esq", "mba", "pe", "cissp"
 }
 LASTNAME_PARTICLES = {
     "da", "de", "del", "della", "der", "di", "du", "la", "le", "los", "las",
