@@ -61,7 +61,7 @@ def print_banner():
 #   1) --api-key argument
 #   2) SERPAPI_KEY environment variable
 #   3) HARDCODED_SERPAPI_KEY (convenient fallback; leave "" to disable)
-HARDCODED_SERPAPI_KEY = "da93ffeb849c7ed8e668110d794eecd5c4757ef5328d72f71d4d9d87cd601fc9"  # e.g. "your_serpapi_key_here"
+HARDCODED_SERPAPI_KEY = "<key>"  # e.g. "your_serpapi_key_here"
 
 try:
     from pypdf import PdfReader
