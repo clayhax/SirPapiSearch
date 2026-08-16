@@ -283,7 +283,7 @@ def render_email(fmt: str, first: str, last: str, email_domain: str | None = Non
     return out
 
 
-def linkedin_search_names(company: str, api_key: str, max_results: int, sleep_s: float) -> list[tuple[str, str, str]]:
+def linkedin_search_names(company: str, api_key: str, max_results: int, sleep_s: float) -> list[tuple[str, str, str, str]]:
     query = f'site:linkedin.com/in "{company}"'
     urls_seen = set()
     results_out = []
@@ -322,7 +322,7 @@ def linkedin_search_names(company: str, api_key: str, max_results: int, sleep_s:
             if not first or not last:
                 continue
 
-            results_out.append((link, first, last))
+            results_out.append((link, title, first, last))
 
         time.sleep(sleep_s)
 
@@ -994,6 +994,12 @@ def main():
                         help="Optional override: email domain to use for --linkedin mode. If omitted, uses positional <domain> argument.")
     parser.add_argument("--out-emails", default="linkedin-emails.txt",
                         help="Output file for generated emails (default: linkedin-emails.txt)")
+                        
+    parser.add_argument(
+        "--out-profiles",
+        default="linkedin-profiles.csv",
+        help="Output CSV for LinkedIn source profiles (default: linkedin-profiles.csv)"
+    )
 
     parser.add_argument(
         "--types",
@@ -1054,18 +1060,54 @@ def main():
         success(f"(linkedin) Parsed {len(contacts)} LinkedIn name hits (first+last).")
 
         emails = set()
-        for (url, first, last) in contacts:
+        for (url, title, first, last) in contacts:
             try:
-                emails.add(render_email(args.email_format, first, last, effective_email_domain))
+                emails.add(
+                    render_email(
+                        args.email_format,
+                        first,
+                        last,
+                        effective_email_domain
+                    )
+                )
             except Exception as e:
-                print(f"[-] (linkedin) Failed rendering email for {first} {last} ({url}): {e}")
+                error(
+                    f"(linkedin) Failed rendering email for "
+                    f"{first} {last} ({url}): {e}"
+                )
 
         sorted_emails = sorted(emails)
+        # write linkedin-emails.txt
         with open(args.out_emails, "w", encoding="utf-8") as f:
             for e in sorted_emails:
                 f.write(e + "\n")
 
         success(f"Emails saved to {args.out_emails} ({len(sorted_emails)} unique).")
+        
+        # Write LinkedIn profile/source information for auditing
+        with open(args.out_profiles, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            writer.writerow([
+                "LinkedInURL",
+                "GoogleTitle",
+                "FirstName",
+                "LastName"
+            ])
+
+            for url, title, first, last in contacts:
+                writer.writerow([
+                    url,
+                    title,
+                    first,
+                    last
+                ])
+
+        success(
+            f"LinkedIn profiles saved to {args.out_profiles} "
+            f"({len(contacts)} profiles)."
+        )
+
         return  # will not proceed automatically with file enumeration afterward in linkedin mode
 
     # ---------------- File Enumeration Mode (default) ----------------
