@@ -11,7 +11,6 @@ Built specifically for **penetration testing and OSINT workflows**.
 
 <p align="center">
   <img src="screenshots/SirPapiSearch-help.png" width="900">
-  <img src="screenshots/SirPapiSearch-demo.png" width="900">
 </p>
 
 ---
@@ -37,6 +36,10 @@ Built specifically for **penetration testing and OSINT workflows**.
 - Streamed downloads (no disk writes)
 - Outputs file URLs to `domain-URLs.txt` and extracted metadata to `domain-Metadata.csv` by default
 
+<p align="center">
+  <img src="screenshots/SirPapiSearch-demo-file.png" width="900">
+</p>
+
 ---
 
 ### LinkedIn Email Enumeration Mode
@@ -47,6 +50,10 @@ Built specifically for **penetration testing and OSINT workflows**.
 
 Supported placeholders:
 - `{first}`, `{last}`, `{f}`, `{l}`
+
+<p align="center">
+  <img src="screenshots/SirPapiSearch-demo-linkedin.png" width="900">
+</p>
 
 ---
 
@@ -92,7 +99,7 @@ This tool is intended for **authorized security testing only**.
 
 ## 👤 Author
 
-cl4yh4x
+clayhax
 
 ---
 

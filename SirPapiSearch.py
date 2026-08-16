@@ -24,19 +24,20 @@ WHITE = "\033[97m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 RED = "\033[91m"
+DIM = "\033[90m"
 RESET = "\033[0m"
 
 def info(message):
     print(f"{CYAN}[+]{RESET} {message}")
 
-
 def success(message):
     print(f"{GREEN}[✓]{RESET} {message}")
 
+def notice(message):
+    print(f"{DIM}[*]{RESET} {message}")
 
 def warning(message):
     print(f"{YELLOW}[!]{RESET} {message}")
-
 
 def error(message):
     print(f"{RED}[-]{RESET} {message}")
@@ -60,7 +61,7 @@ def print_banner():
 #   1) --api-key argument
 #   2) SERPAPI_KEY environment variable
 #   3) HARDCODED_SERPAPI_KEY (convenient fallback; leave "" to disable)
-HARDCODED_SERPAPI_KEY = "<key>"  # e.g. "your_serpapi_key_here"
+HARDCODED_SERPAPI_KEY = "da93ffeb849c7ed8e668110d794eecd5c4757ef5328d72f71d4d9d87cd601fc9"  # e.g. "your_serpapi_key_here"
 
 try:
     from pypdf import PdfReader
@@ -111,20 +112,33 @@ KEYWORDS = [
 
 DOCUMENT_PATHS = [
     "/documents",
+    "/docs",
     "/forms",
     "/resources",
     "/downloads",
     "/policies",
+    "/procedures",
     "/board",
+    "/boards",
     "/departments",
     "/staff",
     "/media",
     "/files",
-    "/directory",
+    "/uploads",
+    "/public",
     "/publications",
     "/public-notices",
+    "/notices",
     "/agendas",
     "/minutes",
+    "/meetings",
+    "/records",
+    "/reports",
+    "/archive",
+    "/archives",
+    "/backup",
+    "/data",
+    "/assets"
 ]
 
 
@@ -275,13 +289,13 @@ def linkedin_search_names(company: str, api_key: str, max_results: int, sleep_s:
     results_out = []
 
     for start in range(0, max_results, 10):
-        print(f"[+] (linkedin) Fetching results from offset {start}")
+        info(f"(linkedin) Fetching results from offset {start}")
         params = {"engine": "google", "q": query, "api_key": api_key, "start": start, "num": 10}
 
         results = search(params)
         organic = results.get("organic_results", [])
         if not organic:
-            print("[-] (linkedin) No more results.")
+            notice("(linkedin) No more results.")
             break
 
         for r in organic:
@@ -531,25 +545,53 @@ def http_fetch(url: str, timeout: int, max_bytes: int, user_agent: str):
         content = buf.getvalue()
         return content, ct, str(total), lm, etag
         
-def discover_document_pages(domain, user_agent):
+def discover_document_pages(domain, user_agent, timeout=5):
     discovered = set()
+    timed_out = 0
+    unavailable = 0
+    total_paths = len(DOCUMENT_PATHS)
 
-    for path in DOCUMENT_PATHS:
+    for i, path in enumerate(DOCUMENT_PATHS, 1):
+        # Update progress on a single terminal line
+        print(
+            f"\r{CYAN}[+]{RESET} Checking common document paths... "
+            f"[{i}/{total_paths}] | Found: {len(discovered)}",
+            end="",
+            flush=True
+        )
+
         url = f"https://{domain}{path}"
 
         try:
             r = requests.get(
                 url,
                 headers={"User-Agent": user_agent},
-                timeout=15,
+                timeout=timeout,
                 allow_redirects=True
             )
 
             if r.status_code == 200:
                 discovered.add(r.url)
+            else:
+                unavailable += 1
 
-        except Exception:
-            pass
+        except requests.exceptions.Timeout:
+            timed_out += 1
+
+        except requests.exceptions.RequestException:
+            unavailable += 1
+
+    # Refresh once more so the final count reflects the last request
+    print(
+        f"\r{CYAN}[+]{RESET} Checking common document paths... "
+        f"[{total_paths}/{total_paths}] | Found: {len(discovered)}"
+    )
+
+    if timed_out:
+        warning(f"{timed_out} document path checks timed out.")
+
+    if unavailable:
+        notice(f"{unavailable} document paths were unavailable.")
 
     return discovered
     
@@ -657,7 +699,7 @@ def crawl_document_tree(start_pages, domain, user_agent, timeout, max_depth=5, s
             continue
 
         visited_pages.add(page)
-        print(f"[+] Crawling document folder depth={depth}: {page}")
+        info(f"Crawling document folder depth={depth}: {page}")
 
         try:
             r = requests.get(
@@ -688,10 +730,10 @@ def crawl_document_tree(start_pages, domain, user_agent, timeout, max_depth=5, s
             time.sleep(sleep_s)
 
         except Exception as e:
-            print(f"[-] Failed crawling document folder {page}: {e}")
+            error(f"Failed crawling document folder {page}: {e}")
 
-    print(f"[✓] Document tree crawl visited {len(visited_pages)} pages.")
-    print(f"[✓] Document tree crawl found {len(found_files)} file URLs.")
+    success(f"Document tree crawl visited {len(visited_pages)} pages.")
+    success(f"Document tree crawl found {len(found_files)} file URLs.")
 
     return found_files
     
@@ -893,7 +935,7 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
         results = search(params)
         organic = results.get("organic_results", [])
         if not organic:
-            print(f"[-] ({ext}) No more results.")
+            notice(f"({ext}) No more results.")
             break
 
         for r in organic:
@@ -980,8 +1022,8 @@ def main():
         )
         
     if BeautifulSoup is None:
-        print(
-            "[-] beautifulsoup4 not installed. "
+        warning(
+            "beautifulsoup4 not installed. "
             "Document portal crawling disabled. "
             "Install with: python3 -m pip install beautifulsoup4"
         )
@@ -1009,7 +1051,7 @@ def main():
             sleep_s=args.sleep
         )
 
-        print(f"[✓] (linkedin) Parsed {len(contacts)} LinkedIn name hits (first+last).")
+        success(f"(linkedin) Parsed {len(contacts)} LinkedIn name hits (first+last).")
 
         emails = set()
         for (url, first, last) in contacts:
@@ -1023,7 +1065,7 @@ def main():
             for e in sorted_emails:
                 f.write(e + "\n")
 
-        print(f"[✓] Emails saved to {args.out_emails} ({len(sorted_emails)} unique).")
+        success(f"Emails saved to {args.out_emails} ({len(sorted_emails)} unique).")
         return  # will not proceed automatically with file enumeration afterward in linkedin mode
 
     # ---------------- File Enumeration Mode (default) ----------------
@@ -1039,7 +1081,8 @@ def main():
 
         document_pages = discover_document_pages(
             args.domain,
-            args.user_agent
+            args.user_agent,
+            timeout=5
         )
 
         all_urls.update(
@@ -1054,12 +1097,13 @@ def main():
         )
 
     sorted_urls = sorted(all_urls)
-    print(f"\n[✓] Found {len(sorted_urls)} unique URLs across types: {', '.join(types)}")
+    print()
+    success(f"Found {len(sorted_urls)} unique URLs across types: {', '.join(types)}")
 
     with open(out_urls, "w", encoding="utf-8") as f:
         for u in sorted_urls:
             f.write(u + "\n")
-    print(f"[✓] URLs saved to {out_urls}")
+    success(f"URLs saved to {out_urls}")
 
     fieldnames = list(MetaRow.__annotations__.keys())
     with open(out_csv, "w", newline="", encoding="utf-8") as csvfile:
@@ -1099,7 +1143,7 @@ def main():
                 Error="",
             )
 
-            print(f"[+] ({idx}/{len(sorted_urls)}) Processing: {url}")
+            info(f"({idx}/{len(sorted_urls)}) Processing: {url}")
 
             try:
                 content, ct, size_bytes, lm, etag = http_fetch(
@@ -1130,7 +1174,7 @@ def main():
 
             writer.writerow(asdict(row))
 
-    print(f"[✓] Report saved to {out_csv}")
+    success(f"Report saved to {out_csv}")
 
 
 if __name__ == "__main__":
