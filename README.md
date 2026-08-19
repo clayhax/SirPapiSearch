@@ -62,6 +62,7 @@ Supported placeholders:
 ```bash
 git clone https://github.com/clayhax/SirPapiSearch.git
 cd SirPapiSearch
+python3 -m pip install -r requirements.txt
 ```
 ## API Key Configuration
 * Register and grab your SerpAPI key https://serpapi.com/

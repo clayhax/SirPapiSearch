@@ -1,0 +1,30 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+
+# Ruff cache
+.ruff_cache/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# SirPapiSearch generated output
+*-URLs.txt
+*-Metadata.csv
+linkedin-emails.txt
+linkedin-profiles.csv
+
+# Environment / secrets
+.env
