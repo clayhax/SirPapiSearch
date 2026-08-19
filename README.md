@@ -63,11 +63,6 @@ Supported placeholders:
 git clone https://github.com/clayhax/SirPapiSearch.git
 cd SirPapiSearch
 ```
-Install dependencies:
-```bash
-python3 -m pip install serpapi requests pypdf python-docx openpyxl python-pptx olefile beautifulsoup4
-```
-
 ## API Key Configuration
 * Register and grab your SerpAPI key https://serpapi.com/
 * SirPapiSearch supports three methods (priority order):
