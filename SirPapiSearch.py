@@ -147,8 +147,16 @@ HONORIFICS = {
     "mr", "mrs", "ms", "miss", "mx", "dr", "prof", "sir", "madam", "dame",
 }
 SUFFIXES = {
-    "jr", "sr", "ii", "iii", "iv", "v", "md", "phd", "dds", "dvm", "esq", "mba", "pe", "cissp"
+    "jr", "sr", "ii", "iii", "iv", "v",
+    "md", "phd", "dds", "dvm", "esq", "mba", "pe", "cissp",
 }
+
+PROFESSIONAL_CREDENTIALS = {
+    "cic", "cpia", "cpcu", "crm", "arm", "ains",
+    "cpa", "pmp", "rn", "msn", "np", "jd",
+    "clu", "chfc", "cfp",
+}
+
 LASTNAME_PARTICLES = {
     "da", "de", "del", "della", "der", "di", "du", "la", "le", "los", "las",
     "van", "von", "st", "st.", "san", "santa",
@@ -200,18 +208,49 @@ def clean_linkedin_title_to_name(title: str) -> str:
 
 def parse_first_last(full_name: str) -> tuple[str, str]:
     """
-    Heuristics:
-    - Remove honorifics at start (Dr, Mr, etc.)
-    - Remove suffixes at end (Jr, Sr, II, etc.)
-    - First token => first name
-    - Last token => last name (+ attach particles like 'de la', 'van', etc. if present)
-    - Middle names ignored
+    Parse a LinkedIn/Google display name into first and last name.
+
+    Handles:
+    - Honorifics: Dr., Mr., Prof., etc.
+    - Generational/name suffixes: Jr., Sr., II, III, etc.
+    - Comma-delimited professional credentials: CIC, CPIA, CPA, etc.
+    - Middle names/initials: ignored
+    - Last-name particles: de, de la, van, von, etc.
     """
     if not full_name:
         return ("", "")
 
     s = full_name.strip()
-    s = re.sub(r"[,\u00A0]+", " ", s)
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"\s{2,}", " ", s).strip()
+
+    # Strip comma-delimited professional credentials.
+    # Only remove trailing comma-separated segments when every token
+    # is a recognized professional credential.
+    if "," in s:
+        segments = [seg.strip() for seg in s.split(",") if seg.strip()]
+
+        if len(segments) > 1:
+            credential_tokens = []
+
+            for segment in segments[1:]:
+                credential_tokens.extend(
+                    token.rstrip(".").lower()
+                    for token in segment.split()
+                    if token
+                )
+
+            if (
+                credential_tokens
+                and all(
+                    token in PROFESSIONAL_CREDENTIALS
+                    for token in credential_tokens
+                )
+            ):
+                s = segments[0]
+
+    # Any remaining commas are treated as separators.
+    s = re.sub(r",+", " ", s)
     s = re.sub(r"\s{2,}", " ", s).strip()
 
     raw_parts = [p for p in s.split(" ") if p]
@@ -221,28 +260,37 @@ def parse_first_last(full_name: str) -> tuple[str, str]:
     if len(parts) < 2:
         return ("", "")
 
+    # Remove leading honorifics
     while parts and parts[0].rstrip(".").lower() in HONORIFICS:
         parts.pop(0)
+
     if len(parts) < 2:
         return ("", "")
 
+    # Remove trailing suffixes
     while parts and parts[-1].rstrip(".").lower() in SUFFIXES:
         parts.pop()
+
     if len(parts) < 2:
         return ("", "")
 
     first = parts[0]
     last = parts[-1]
 
-    # Attach particles immediately before last token (can chain)
+    # Attach surname particles immediately preceding the last name.
+    #
+    # Maria De La Cruz -> first=Maria, last=De La Cruz
     i = len(parts) - 2
     particle_chain = []
+
     while i >= 1:
         token = parts[i].rstrip(".").lower()
+
         if token in LASTNAME_PARTICLES:
             particle_chain.insert(0, parts[i])
             i -= 1
             continue
+
         break
 
     if particle_chain:
@@ -256,7 +304,8 @@ def normalize_for_email(s: str) -> str:
     s = s.replace(" ", "")
     s = s.replace("'", "")
     s = s.replace("-", "")
-    s = re.sub(r"[^a-z0-9.]", "", s)
+    s = s.replace(".", "")
+    s = re.sub(r"[^a-z0-9]", "", s)
     return s
 
 
