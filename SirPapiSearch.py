@@ -53,7 +53,7 @@ def print_banner():
 
 """
     print(CYAN + banner + RESET)
-    print(WHITE + "        SirPapiSearch v3.1 | by cl4yh4x" + RESET)
+    print(WHITE + "        SirPapiSearch v3.2 | by cl4yh4x" + RESET)
     print()
 
 # ---------------- SerpAPI Key Configuration ----------------
@@ -154,7 +154,7 @@ SUFFIXES = {
 PROFESSIONAL_CREDENTIALS = {
     "cic", "cpia", "cpcu", "crm", "arm", "ains",
     "cpa", "pmp", "rn", "msn", "np", "jd",
-    "clu", "chfc", "cfp",
+    "clu", "chfc", "cfp", "cfa", "caia", "aif"
 }
 
 LASTNAME_PARTICLES = {
@@ -205,6 +205,43 @@ def clean_linkedin_title_to_name(title: str) -> str:
 
     return t
 
+def get_linkedin_result_url(result: dict) -> str:
+    """
+    Extract a direct LinkedIn /in/ profile URL from a SerpAPI
+    organic result.
+    """
+
+    candidates = []
+
+    link = (result.get("link") or "").strip()
+    if link:
+        candidates.append(link)
+
+    about_link = (result.get("about_page_link") or "").strip()
+    if about_link:
+        decoded = unquote(about_link)
+
+        match = re.search(
+            r"https?://(?:www\.)?linkedin\.com/in/[^&?#\s/]+",
+            decoded,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            candidates.append(match.group(0))
+
+    for candidate in candidates:
+        match = re.search(
+            r"https?://(?:www\.)?linkedin\.com/in/([^/?#&\s]+)",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            slug = match.group(1)
+            return f"https://www.linkedin.com/in/{slug}"
+
+    return ""
 
 def parse_first_last(full_name: str) -> tuple[str, str]:
     """
@@ -298,6 +335,33 @@ def parse_first_last(full_name: str) -> tuple[str, str]:
 
     return (first, last)
 
+def parse_linkedin_slug(link: str) -> tuple[str, str]:
+    try:
+        path = urlparse(link).path.strip("/")
+        parts = path.split("/")
+
+        if len(parts) < 2 or parts[0].lower() != "in":
+            return ("", "")
+
+        slug = unquote(parts[1]).strip().lower()
+
+        tokens = [t for t in slug.split("-") if t]
+
+        # Remove common LinkedIn identifier suffixes such as:
+        # john-smith-8a631730
+        while tokens and re.fullmatch(r"[a-f0-9]{6,}", tokens[-1]):
+            tokens.pop()
+
+        if len(tokens) < 2:
+            return ("", "")
+
+        first = normalize_name_token(tokens[0])
+        last = normalize_name_token(tokens[-1])
+
+        return (first, last)
+
+    except Exception:
+        return ("", "")
 
 def normalize_for_email(s: str) -> str:
     s = strip_accents(s).lower()
@@ -332,29 +396,53 @@ def render_email(fmt: str, first: str, last: str, email_domain: str | None = Non
     return out
 
 
-def linkedin_search_names(company: str, api_key: str, max_results: int, sleep_s: float) -> list[tuple[str, str, str, str]]:
-    query = f'site:linkedin.com/in "{company}"'
+def linkedin_search_names(
+    company: str,
+    api_key: str,
+    max_results: int,
+    sleep_s: float
+) -> list[tuple[str, str, str, str]]:
+
+    query = f'site:linkedin.com/in/ "{company}"'
+
     urls_seen = set()
     results_out = []
 
+    raw_results = 0
+    linkedin_results = 0
+
     for start in range(0, max_results, 10):
         info(f"(linkedin) Fetching results from offset {start}")
-        params = {"engine": "google", "q": query, "api_key": api_key, "start": start, "num": 10}
+
+        params = {
+            "engine": "google",
+            "q": query,
+            "api_key": api_key,
+            "start": start,
+            "num": 10,
+        }
 
         results = search(params)
         organic = results.get("organic_results", [])
+
         if not organic:
             notice("(linkedin) No more results.")
             break
 
         for r in organic:
-            link = (r.get("link") or "").strip()
+            raw_results += 1
+
+            link = get_linkedin_result_url(r)
             title = (r.get("title") or "").strip()
 
-            if "linkedin.com/in/" not in link:
+            if not link:
                 continue
+
+            linkedin_results += 1
+
             if link in urls_seen:
                 continue
+
             urls_seen.add(link)
 
             name_chunk = clean_linkedin_title_to_name(title)
@@ -362,18 +450,41 @@ def linkedin_search_names(company: str, api_key: str, max_results: int, sleep_s:
                 continue
 
             # Filter obvious non-person titles
-            if re.search(r"\b(linkedin|profiles?|people)\b", name_chunk, re.IGNORECASE):
+            if re.search(
+                r"\b(linkedin|profiles?|people)\b",
+                name_chunk,
+                re.IGNORECASE,
+            ):
                 continue
-            if "member" in name_chunk.lower() and "linkedin" in name_chunk.lower():
+
+            if (
+                "member" in name_chunk.lower()
+                and "linkedin" in name_chunk.lower()
+            ):
                 continue
 
             first, last = parse_first_last(name_chunk)
+
+            # Fallback to LinkedIn slug only if Google title parsing failed
             if not first or not last:
+                slug_first, slug_last = parse_linkedin_slug(link)
+
+                if slug_first and slug_last:
+                    first = slug_first
+                    last = slug_last
+                else:
+                    continue
+
+            # Reject abbreviated surnames such as "Tony S." / "Lisa S."
+            if len(normalize_for_email(last)) < 2:
                 continue
 
             results_out.append((link, title, first, last))
 
         time.sleep(sleep_s)
+
+    notice(f"(linkedin) Raw Google results: {raw_results}")
+    notice(f"(linkedin) LinkedIn profile results: {linkedin_results}")
 
     return results_out
 
@@ -506,15 +617,18 @@ def findings_from_text(content: bytes, sample_limit: int = 300_000) -> dict:
             kw_hits.append(kw)
 
     def summarize(items, max_samples=5):
-        uniq = []
         seen = set()
+        uniq = []
+
         for i in items:
             if i in seen:
                 continue
+
             seen.add(i)
-            uniq.append(i)
-            if len(uniq) >= max_samples:
-                break
+
+            if len(uniq) < max_samples:
+                uniq.append(i)
+
         return len(seen), uniq
 
     email_count, email_samples = summarize(emails)
@@ -682,10 +796,19 @@ def is_document_folder_link(url: str, target_domain: str) -> bool:
     host = parsed.netloc.lower()
     path = parsed.path.lower()
 
+    target_domain = target_domain.lower().lstrip(".")
+
     return (
-        target_domain.lower() in host
+        (
+            host == target_domain
+            or host.endswith("." + target_domain)
+        )
         and path.startswith("/documents/")
-        and not re.search(r"\.(pdf|docx?|xlsx?|pptx?|csv|txt|zip)(?:\?|#|$)", path, re.I)
+        and not re.search(
+            r"\.(pdf|docx?|xlsx?|pptx?|csv|txt|zip)(?:\?|#|$)",
+            path,
+            re.I
+        )
     )
 
 def extract_document_folder_links(html, base_url, domain):
@@ -854,8 +977,8 @@ def extract_docx(content: bytes) -> dict:
         "Author": cp.author or "",
         "Creator": "",
         "Producer": "",
-        "Application": cp.application or "",
-        "Company": cp.company or "",
+        "Application": getattr(cp, "application", "") or "",
+        "Company": getattr(cp, "company", "") or "",
         "LastModifiedBy": cp.last_modified_by or "",
         "Created": normalize_dt(cp.created),
         "Modified": normalize_dt(cp.modified),
@@ -874,8 +997,8 @@ def extract_xlsx(content: bytes) -> dict:
         "Author": p.creator or "",
         "Creator": p.creator or "",
         "Producer": "",
-        "Application": p.application or "",
-        "Company": p.company or "",
+        "Application": getattr(p, "application", "") or "",
+        "Company": getattr(p, "company", "") or "",
         "LastModifiedBy": p.lastModifiedBy or "",
         "Created": normalize_dt(p.created),
         "Modified": normalize_dt(p.modified),
@@ -894,8 +1017,8 @@ def extract_pptx(content: bytes) -> dict:
         "Author": cp.author or "",
         "Creator": "",
         "Producer": "",
-        "Application": cp.application or "",
-        "Company": cp.company or "",
+        "Application": getattr(cp, "application", "") or "",
+        "Company": getattr(cp, "company", "") or "",
         "LastModifiedBy": cp.last_modified_by or "",
         "Created": normalize_dt(cp.created),
         "Modified": normalize_dt(cp.modified),
@@ -973,6 +1096,41 @@ EXTRACTORS = {
     "zip": extract_zip,
 }
 
+def resolve_serpapi_result_url(link: str, timeout: int = 10) -> str:
+    """
+    Resolve indirect Google /goto URLs returned by SerpAPI.
+
+    Direct HTTP(S) result URLs are returned unchanged.
+    """
+
+    if not link:
+        return ""
+
+    link = link.strip()
+
+    # Normal direct result
+    if link.startswith(("http://", "https://")):
+        return link
+
+    # Google indirect result
+    if link.startswith("/goto?"):
+        google_url = "https://www.google.com" + link
+
+        try:
+            r = requests.get(
+                google_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                allow_redirects=True,
+                timeout=timeout,
+                stream=True,
+            )
+
+            return r.url
+
+        except requests.RequestException:
+            return ""
+
+    return ""
 
 def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, sleep_s: float) -> set[str]:
     q = f"site:{domain} filetype:{ext}"
@@ -988,7 +1146,12 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
             break
 
         for r in organic:
-            link = r.get("link")
+            raw_link = (r.get("link") or "").strip()
+
+            if not raw_link:
+                continue
+
+            link = resolve_serpapi_result_url(raw_link)
 
             if not link:
                 continue
@@ -996,8 +1159,15 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
             parsed = urlparse(link)
             hostname = parsed.netloc.lower()
 
+            domain_lower = domain.lower().lstrip(".")
+
+            allowed_domain = (
+                hostname == domain_lower
+                or hostname.endswith("." + domain_lower)
+            )
+
             allowed = (
-                domain.lower() in hostname
+                allowed_domain
                 or bool(detect_platform(link))
             )
 
@@ -1076,13 +1246,6 @@ def main():
             "or hardcode HARDCODED_SERPAPI_KEY in the script."
         )
         
-    if BeautifulSoup is None:
-        warning(
-            "beautifulsoup4 not installed. "
-            "Document portal crawling disabled. "
-            "Install with: python3 -m pip install beautifulsoup4"
-        )
-
     # ---------------- LinkedIn Mode (only if explicitly requested) ----------------
     if args.linkedin:
         if not args.company:
@@ -1158,6 +1321,13 @@ def main():
         )
 
         return  # will not proceed automatically with file enumeration afterward in linkedin mode
+        
+    if BeautifulSoup is None:
+        warning(
+            "beautifulsoup4 not installed. "
+            "Document portal crawling disabled. "
+            "Install with: python3 -m pip install beautifulsoup4"
+        )
 
     # ---------------- File Enumeration Mode (default) ----------------
     out_csv = args.out_csv or f"{args.domain}-Metadata.csv"
