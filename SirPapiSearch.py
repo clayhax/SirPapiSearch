@@ -6,6 +6,7 @@ import re
 import time
 import hashlib
 import unicodedata
+import time
 from dataclasses import dataclass, asdict
 from io import BytesIO
 from urllib.parse import urlparse, unquote, parse_qs, urljoin
@@ -17,6 +18,7 @@ import requests
 import zipfile
 import logging
 from serpapi import search
+from serpapi.exceptions import HTTPError as SerpAPIHTTPError
 
 # ---------------- Terminal Colors ----------------
 CYAN = "\033[96m"
@@ -41,6 +43,43 @@ def warning(message):
 
 def error(message):
     print(f"{RED}[-]{RESET} {message}")
+    
+def serp_search_with_retry(
+    params: dict,
+    context: str,
+    max_retries: int = 3,
+):
+    """
+    Run a SerpAPI search with retry handling for transient HTTP errors.
+
+    Returns:
+        dict on success
+        None after all retry attempts fail
+    """
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return search(params)
+
+        except SerpAPIHTTPError as e:
+            if attempt == max_retries:
+                warning(
+                    f"{context} SerpAPI request failed after "
+                    f"{max_retries} attempts: {e}"
+                )
+                return None
+
+            wait_s = 3 * attempt
+
+            warning(
+                f"{context} SerpAPI request failed. "
+                f"Retrying in {wait_s}s "
+                f"({attempt}/{max_retries})..."
+            )
+
+            time.sleep(wait_s)
+
+    return None
     
 def print_banner():
     banner = r"""
@@ -422,7 +461,18 @@ def linkedin_search_names(
             "num": 10,
         }
 
-        results = search(params)
+        results = serp_search_with_retry(
+            params,
+            context=f"(linkedin) offset {start}:",
+        )
+
+        if results is None:
+            warning(
+                "(linkedin) Stopping search and preserving "
+                "results collected so far."
+            )
+            break
+            
         organic = results.get("organic_results", [])
 
         if not organic:
@@ -1139,8 +1189,21 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
     for start in range(0, max_results, 10):
         info(f"({ext}) Fetching results from offset {start}")
         params = {"engine": "google", "q": q, "api_key": api_key, "start": start, "num": 10}
-        results = search(params)
+        
+        results = serp_search_with_retry(
+            params,
+            context=f"({ext}) offset {start}:",
+        )
+
+        if results is None:
+            warning(
+                f"({ext}) Stopping search and preserving "
+                f"results collected so far."
+            )
+            break
+        
         organic = results.get("organic_results", [])
+        
         if not organic:
             notice(f"({ext}) No more results.")
             break
