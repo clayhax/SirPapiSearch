@@ -193,7 +193,8 @@ SUFFIXES = {
 PROFESSIONAL_CREDENTIALS = {
     "cic", "cpia", "cpcu", "crm", "arm", "ains",
     "cpa", "pmp", "rn", "msn", "np", "jd",
-    "clu", "chfc", "cfp", "cfa", "caia", "aif"
+    "clu", "chfc", "cfp", "cfa", "caia", "aif",
+     "sphr", "phr", "ccws", "cisr"
 }
 
 LASTNAME_PARTICLES = {
@@ -246,39 +247,33 @@ def clean_linkedin_title_to_name(title: str) -> str:
 
 def get_linkedin_result_url(result: dict) -> str:
     """
-    Extract a direct LinkedIn /in/ profile URL from a SerpAPI
-    organic result.
+    Extract a LinkedIn /in/ profile URL from a SerpAPI result.
+
+    Supports www.linkedin.com and country-specific LinkedIn
+    subdomains such as uk.linkedin.com, in.linkedin.com, etc.
     """
 
-    candidates = []
+    linkedin_pattern = re.compile(
+        r"https?://(?:[a-z0-9-]+\.)*linkedin\.com/in/[^&?#\s]+",
+        flags=re.IGNORECASE,
+    )
 
-    link = (result.get("link") or "").strip()
-    if link:
-        candidates.append(link)
+    # First check the normal result URL.
+    link = unquote((result.get("link") or "").strip())
 
-    about_link = (result.get("about_page_link") or "").strip()
-    if about_link:
-        decoded = unquote(about_link)
+    match = linkedin_pattern.search(link)
+    if match:
+        return match.group(0)
 
-        match = re.search(
-            r"https?://(?:www\.)?linkedin\.com/in/[^&?#\s/]+",
-            decoded,
-            flags=re.IGNORECASE,
-        )
+    # SerpAPI/Google may expose the actual destination inside
+    # about_page_link instead.
+    about_link = unquote(
+        (result.get("about_page_link") or "").strip()
+    )
 
-        if match:
-            candidates.append(match.group(0))
-
-    for candidate in candidates:
-        match = re.search(
-            r"https?://(?:www\.)?linkedin\.com/in/([^/?#&\s]+)",
-            candidate,
-            flags=re.IGNORECASE,
-        )
-
-        if match:
-            slug = match.group(1)
-            return f"https://www.linkedin.com/in/{slug}"
+    match = linkedin_pattern.search(about_link)
+    if match:
+        return match.group(0)
 
     return ""
 
@@ -449,89 +444,117 @@ def linkedin_search_names(
 
     raw_results = 0
     linkedin_results = 0
+    
+    consecutive_empty = 0
+    max_consecutive_empty = 10
 
-    for start in range(0, max_results, 10):
-        info(f"(linkedin) Fetching results from offset {start}")
+    try:
+        for start in range(0, max_results, 10):
+            info(f"(linkedin) Fetching results from offset {start}")
 
-        params = {
-            "engine": "google",
-            "q": query,
-            "api_key": api_key,
-            "start": start,
-            "num": 10,
-        }
+            params = {
+                "engine": "google",
+                "q": query,
+                "api_key": api_key,
+                "start": start,
+                "num": 10,
+            }
 
-        results = serp_search_with_retry(
-            params,
-            context=f"(linkedin) offset {start}:",
-        )
-
-        if results is None:
-            warning(
-                "(linkedin) Stopping search and preserving "
-                "results collected so far."
+            results = serp_search_with_retry(
+                params,
+                context=f"(linkedin) offset {start}:",
             )
-            break
-            
-        organic = results.get("organic_results", [])
 
-        if not organic:
-            notice("(linkedin) No more results.")
-            break
+            if results is None:
+                warning(
+                    "(linkedin) Stopping search and preserving "
+                    "results collected so far."
+                )
+                break
+                
+            organic = results.get("organic_results", [])
 
-        for r in organic:
-            raw_results += 1
+            if not organic:
+                consecutive_empty += 1
 
-            link = get_linkedin_result_url(r)
-            title = (r.get("title") or "").strip()
+                notice(
+                    f"(linkedin) Empty result page at offset {start} "
+                    f"({consecutive_empty}/{max_consecutive_empty})."
+                )
 
-            if not link:
+                if consecutive_empty >= max_consecutive_empty:
+                    notice(
+                        f"(linkedin) No results across "
+                        f"{max_consecutive_empty} consecutive pages. "
+                        f"Stopping."
+                    )
+                    break
+
+                time.sleep(sleep_s)
                 continue
 
-            linkedin_results += 1
+            # A populated page resets the empty-page counter.
+            consecutive_empty = 0
 
-            if link in urls_seen:
-                continue
+            for r in organic:
+                raw_results += 1
 
-            urls_seen.add(link)
+                link = get_linkedin_result_url(r)
+                title = (r.get("title") or "").strip()
 
-            name_chunk = clean_linkedin_title_to_name(title)
-            if not name_chunk:
-                continue
-
-            # Filter obvious non-person titles
-            if re.search(
-                r"\b(linkedin|profiles?|people)\b",
-                name_chunk,
-                re.IGNORECASE,
-            ):
-                continue
-
-            if (
-                "member" in name_chunk.lower()
-                and "linkedin" in name_chunk.lower()
-            ):
-                continue
-
-            first, last = parse_first_last(name_chunk)
-
-            # Fallback to LinkedIn slug only if Google title parsing failed
-            if not first or not last:
-                slug_first, slug_last = parse_linkedin_slug(link)
-
-                if slug_first and slug_last:
-                    first = slug_first
-                    last = slug_last
-                else:
+                if not link:
                     continue
 
-            # Reject abbreviated surnames such as "Tony S." / "Lisa S."
-            if len(normalize_for_email(last)) < 2:
-                continue
+                linkedin_results += 1
 
-            results_out.append((link, title, first, last))
+                if link in urls_seen:
+                    continue
 
-        time.sleep(sleep_s)
+                urls_seen.add(link)
+
+                name_chunk = clean_linkedin_title_to_name(title)
+                if not name_chunk:
+                    continue
+
+                # Filter obvious non-person titles
+                if re.search(
+                    r"\b(linkedin|profiles?|people)\b",
+                    name_chunk,
+                    re.IGNORECASE,
+                ):
+                    continue
+
+                if (
+                    "member" in name_chunk.lower()
+                    and "linkedin" in name_chunk.lower()
+                ):
+                    continue
+
+                first, last = parse_first_last(name_chunk)
+
+                # Fallback to LinkedIn slug only if Google title parsing failed
+                if not first or not last:
+                    slug_first, slug_last = parse_linkedin_slug(link)
+
+                    if slug_first and slug_last:
+                        first = slug_first
+                        last = slug_last
+                    else:
+                        continue
+
+                # Reject abbreviated surnames such as "Tony S." / "Lisa S."
+                if len(normalize_for_email(last)) < 2:
+                    continue
+
+                results_out.append((link, title, first, last))
+
+            time.sleep(sleep_s)
+    except KeyboardInterrupt:
+        print()
+        warning(
+            "(linkedin) Search interrupted by user. "
+            "Preserving results collected so far."
+        )
 
     notice(f"(linkedin) Raw Google results: {raw_results}")
     notice(f"(linkedin) LinkedIn profile results: {linkedin_results}")
