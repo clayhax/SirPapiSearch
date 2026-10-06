@@ -194,7 +194,8 @@ PROFESSIONAL_CREDENTIALS = {
     "cic", "cpia", "cpcu", "crm", "arm", "ains",
     "cpa", "pmp", "rn", "msn", "np", "jd",
     "clu", "chfc", "cfp", "cfa", "caia", "aif",
-     "sphr", "phr", "ccws", "cisr"
+    "sphr", "phr", "ccws", "cisr", 
+     "phd", "ches", "ms", "rd", "ldn", "cdces"     
 }
 
 LASTNAME_PARTICLES = {
@@ -1267,7 +1268,19 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enumerate publicly indexed files via SerpAPI (Google) and extract high-value metadata."
+        description=(
+            "Enumerate publicly indexed files via SerpAPI (Google) and extract "
+            "high-value metadata."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+    examples:
+      File enumeration:
+        python3 SirPapiSearch.py example.com
+
+      LinkedIn email enumeration:
+        python3 SirPapiSearch.py example.com --linkedin --company "Example Company" --email-format "{f}{last}"
+    """,
     )
     parser.add_argument("domain", help="Target domain for file enumeration OR email domain for --linkedin mode (e.g. example.com)")
 
@@ -1305,6 +1318,15 @@ def main():
         default="linkedin-profiles.csv",
         help="Output CSV for LinkedIn source profiles (default: linkedin-profiles.csv)"
     )
+    
+    parser.add_argument(
+    "--out-names",
+    default="linkedin-names.txt",
+    help=(
+        "Output file for discovered first/last name pairs "
+        "(default: linkedin-names.txt)."
+    ),
+    )
 
     parser.add_argument(
         "--types",
@@ -1312,7 +1334,7 @@ def main():
         help="Comma-separated file extensions (default: pdf,docx,xlsx,pptx,doc,xls). Add csv,txt if desired."
     )
     parser.add_argument("--max", type=int, default=700, help="Max SerpAPI results per type (default: 700)")
-    parser.add_argument("--sleep", type=float, default=1.0, help="Sleep between SerpAPI requests (default: 1.0)")
+    parser.add_argument("--sleep", type=float, default=0.5, help="Sleep between SerpAPI requests (default: 0.5)")
     parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout seconds (default: 20)")
     parser.add_argument("--max-bytes", type=int, default=20_000_000, help="Max download size per file (default: 20MB)")
     parser.add_argument("--user-agent", default="Mozilla/5.0 (compatible; FileEnum/3.1)",
@@ -1402,8 +1424,25 @@ def main():
                 ])
 
         success(
-            f"LinkedIn profiles saved to {args.out_profiles} "
-            f"({len(contacts)} profiles)."
+        f"LinkedIn profiles saved to {args.out_profiles} "
+        f"({len(contacts)} profiles)."
+        )
+
+        # Write unique first/last name pairs for later email mangling
+        names = {
+            f"{first} {last}"
+            for _, _, first, last in contacts
+        }
+
+        sorted_names = sorted(names, key=str.lower)
+
+        with open(args.out_names, "w", encoding="utf-8") as f:
+            for name in sorted_names:
+                f.write(name + "\n")
+
+        success(
+            f"LinkedIn names saved to {args.out_names} "
+            f"({len(sorted_names)} unique names)."
         )
 
         return  # will not proceed automatically with file enumeration afterward in linkedin mode
