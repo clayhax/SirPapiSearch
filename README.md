@@ -48,6 +48,7 @@ Built specifically for **penetration testing and OSINT workflows**.
 - Uses Google-indexed LinkedIn results (no scraping)
 - Extracts **FirstName + LastName**
 - Generates email formats
+- Accepts multiple comma-separated formats in a single run to try several candidate conventions at once (e.g. unsure whether the target uses `flast` or `first.last`)
 
 Supported placeholders:
 - `{first}`, `{last}`, `{f}`, `{l}`
@@ -93,6 +94,12 @@ python3 SirPapiSearch.py example.com --workers 20
 
 ```bash
 python3 SirPapiSearch.py company.com --linkedin --company "Company Name" --email-format "{f}{last}"
+```
+
+Not sure which convention the company uses? Pass several comma-separated formats in one run — every contact gets rendered against each format, with no extra SerpAPI queries:
+
+```bash
+python3 SirPapiSearch.py company.com --linkedin --company "Company Name" --email-format "{f}{last},{first}.{last},{first}{l},{last}{f},{last}.{first}"
 ```
 
 ---

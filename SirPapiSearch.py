@@ -1368,6 +1368,9 @@ def main():
 
       LinkedIn email enumeration:
         python3 SirPapiSearch.py example.com --linkedin --company "Example Company" --email-format "{f}{last}"
+
+      LinkedIn email enumeration, multiple candidate formats:
+        python3 SirPapiSearch.py example.com --linkedin --company "Example Company" --email-format "{f}{last},{first}.{last},{first}{l}"
     """,
     )
     parser.add_argument("domain", help="Target domain for file enumeration OR email domain for --linkedin mode (e.g. example.com)")
@@ -1394,6 +1397,9 @@ def main():
                         help="Company name to search in LinkedIn results (required with --linkedin)")
     parser.add_argument("--email-format", default=None,
                         help="REQUIRED with --linkedin. Template supports {first},{last},{f},{l}. "
+                             "Accepts a comma-separated list to generate multiple candidate "
+                             "formats per contact in one pass, e.g. "
+                             "'{f}{last},{first}.{last},{first}{l}'. "
                              "Examples: '{f}{last}@domain.com', '{first}{last}@domain.com', '{first}.{last}' (appends @<domain>).")
     # Optional override; by default we use the positional domain argument as the email domain.
     parser.add_argument("--email-domain", default=None,
@@ -1450,6 +1456,17 @@ def main():
         if not args.email_format:
             raise SystemExit("[-] --email-format is required when using --linkedin")
 
+        # Comma-separated list of candidate formats, e.g.
+        # "{f}{last},{first}.{last},{first}{l}"
+        email_formats = [
+            fmt.strip()
+            for fmt in args.email_format.split(",")
+            if fmt.strip()
+        ]
+
+        if not email_formats:
+            raise SystemExit("[-] --email-format did not contain any usable formats")
+
         # Email domain defaults to positional <domain> unless overridden
         effective_email_domain = args.email_domain or args.domain
         
@@ -1470,20 +1487,21 @@ def main():
 
         emails = set()
         for (url, title, first, last) in contacts:
-            try:
-                emails.add(
-                    render_email(
-                        args.email_format,
-                        first,
-                        last,
-                        effective_email_domain
+            for fmt in email_formats:
+                try:
+                    emails.add(
+                        render_email(
+                            fmt,
+                            first,
+                            last,
+                            effective_email_domain
+                        )
                     )
-                )
-            except Exception as e:
-                error(
-                    f"(linkedin) Failed rendering email for "
-                    f"{first} {last} ({url}): {e}"
-                )
+                except Exception as e:
+                    error(
+                        f"(linkedin) Failed rendering email for "
+                        f"{first} {last} with format '{fmt}' ({url}): {e}"
+                    )
 
         sorted_emails = sorted(emails)
         # write linkedin-emails.txt
@@ -1491,7 +1509,10 @@ def main():
             for e in sorted_emails:
                 f.write(e + "\n")
 
-        success(f"Emails saved to {args.out_emails} ({len(sorted_emails)} unique).")
+        success(
+            f"Emails saved to {args.out_emails} "
+            f"({len(sorted_emails)} unique across {len(email_formats)} format(s))."
+        )
         
         # Write LinkedIn profile/source information for auditing
         with open(args.out_profiles, "w", newline="", encoding="utf-8") as csvfile:
