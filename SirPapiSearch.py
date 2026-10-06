@@ -101,7 +101,7 @@ def print_banner():
 #   1) --api-key argument
 #   2) SERPAPI_KEY environment variable
 #   3) HARDCODED_SERPAPI_KEY (convenient fallback; leave "" to disable)
-HARDCODED_SERPAPI_KEY = "<key>"  # e.g. "your_serpapi_key_here"
+HARDCODED_SERPAPI_KEY = ""  # e.g. "your_serpapi_key_here"
 
 try:
     from pypdf import PdfReader
@@ -889,7 +889,28 @@ def extract_json_file_urls(html):
     urls.update(matches)
     return urls
     
-def is_document_folder_link(url: str, target_domain: str) -> bool:
+def compute_root_prefixes(start_pages) -> set[str]:
+    """
+    Derive the document-root path prefixes actually discovered for this
+    domain (e.g. "/resources", "/documents", "/board") from the resolved
+    start-page URLs, so folder recursion isn't hardcoded to "/documents/"
+    alone.
+
+    A start page that resolves to "/" (e.g. a dead path redirecting to
+    the homepage) is excluded, since treating "/" as a root prefix would
+    match every link on the site.
+    """
+    prefixes = set()
+
+    for page in start_pages:
+        path = urlparse(page).path.rstrip("/").lower()
+        if path:
+            prefixes.add(path)
+
+    return prefixes
+
+
+def is_document_folder_link(url: str, target_domain: str, root_prefixes: set[str]) -> bool:
     parsed = urlparse(url)
     host = parsed.netloc.lower()
     path = parsed.path.lower()
@@ -901,7 +922,7 @@ def is_document_folder_link(url: str, target_domain: str) -> bool:
             host == target_domain
             or host.endswith("." + target_domain)
         )
-        and path.startswith("/documents/")
+        and any(path.startswith(root + "/") for root in root_prefixes)
         and not re.search(
             r"\.(pdf|docx?|xlsx?|pptx?|csv|txt|zip)(?:\?|#|$)",
             path,
@@ -909,8 +930,11 @@ def is_document_folder_link(url: str, target_domain: str) -> bool:
         )
     )
 
-def extract_document_folder_links(html, base_url, domain):
+def extract_document_folder_links(html, base_url, domain, root_prefixes):
     folder_urls = set()
+
+    if not root_prefixes:
+        return folder_urls
 
     # Normal href-based extraction
     soup = BeautifulSoup(html, "html.parser")
@@ -921,35 +945,35 @@ def extract_document_folder_links(html, base_url, domain):
 
         absolute_url = urljoin(base_url, link)
 
-        if is_document_folder_link(absolute_url, domain):
+        if is_document_folder_link(absolute_url, domain, root_prefixes):
             folder_urls.add(absolute_url)
 
-    # Raw HTML / JS extraction for Apptegy/Thrillshare-style routes
-    raw_patterns = re.findall(
-        r'["\']?(\/documents\/[^"\'<>\s]+?\/\d+)["\']?',
-        html,
+    # Raw HTML / JS extraction for Apptegy/Thrillshare-style routes,
+    # generalized to whichever document-ish roots were actually
+    # discovered for this domain (not just "/documents/").
+    root_alternation = "|".join(re.escape(root) for root in root_prefixes)
+    raw_pattern = re.compile(
+        r'["\']?(' + root_alternation + r'/[^"\'<>\s]+?/\d+)["\']?',
         re.I
     )
+
+    raw_patterns = raw_pattern.findall(html)
 
     for path in raw_patterns:
         absolute_url = urljoin(base_url, path)
 
-        if is_document_folder_link(absolute_url, domain):
+        if is_document_folder_link(absolute_url, domain, root_prefixes):
             folder_urls.add(absolute_url)
 
     # Handle escaped slashes from JSON: \/documents\/parents\/supply-lists\/24538815
     unescaped_html = html.replace("\\/", "/")
 
-    escaped_patterns = re.findall(
-        r'["\']?(\/documents\/[^"\'<>\s]+?\/\d+)["\']?',
-        unescaped_html,
-        re.I
-    )
+    escaped_patterns = raw_pattern.findall(unescaped_html)
 
     for path in escaped_patterns:
         absolute_url = urljoin(base_url, path)
 
-        if is_document_folder_link(absolute_url, domain):
+        if is_document_folder_link(absolute_url, domain, root_prefixes):
             folder_urls.add(absolute_url)
 
     return folder_urls
@@ -958,6 +982,10 @@ def crawl_document_tree(start_pages, domain, user_agent, timeout, max_depth=5, s
     found_files = set()
     visited_pages = set()
     queue = [(page, 0) for page in start_pages]
+
+    root_prefixes = compute_root_prefixes(start_pages)
+    if root_prefixes:
+        notice(f"Recursing under discovered document root(s): {sorted(root_prefixes)}")
 
     while queue:
         page, depth = queue.pop(0)
@@ -990,7 +1018,8 @@ def crawl_document_tree(start_pages, domain, user_agent, timeout, max_depth=5, s
             folder_links = extract_document_folder_links(
                 html=html,
                 base_url=page,
-                domain=domain
+                domain=domain,
+                root_prefixes=root_prefixes
             )
 
             for folder_url in folder_links:
@@ -1291,14 +1320,11 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
 
 
 def build_metadata_row(url: str, args, session: requests.Session) -> MetaRow:
-    ext = guess_ext(url) or "unknown"
-    filename = safe_filename_from_url(url)
-
     row = MetaRow(
         URL=url,
-        FileType=ext,
-        FileName=filename,
-        Platform=detect_platform(url),
+        FileType="unknown",
+        FileName="",
+        Platform="",
         SizeBytes="",
         ContentType="",
         SHA256="",
@@ -1324,6 +1350,11 @@ def build_metadata_row(url: str, args, session: requests.Session) -> MetaRow:
     )
 
     try:
+        ext = guess_ext(url) or "unknown"
+        row.FileType = ext
+        row.FileName = safe_filename_from_url(url)
+        row.Platform = detect_platform(url)
+
         content, ct, size_bytes, lm, etag = http_fetch(
             url=url, timeout=args.timeout, max_bytes=args.max_bytes,
             user_agent=args.user_agent, session=session
