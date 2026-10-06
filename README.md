@@ -34,6 +34,7 @@ Built specifically for **penetration testing and OSINT workflows**.
   - File hashes (SHA256)
   - High-signal findings (emails, usernames, keywords)
 - Streamed downloads (no disk writes)
+- Concurrent document-path probing and file downloads/extraction via a thread pool (`--workers`, default 10)
 - Outputs file URLs to `domain-URLs.txt` and extracted metadata to `domain-Metadata.csv` by default
 
 <p align="center">
@@ -81,6 +82,13 @@ python3 -m pip install -r requirements.txt
 ```bash
 python3 SirPapiSearch.py example.com
 ```
+
+Tune concurrency for document-path probing and file downloads with `--workers` (default: 10):
+
+```bash
+python3 SirPapiSearch.py example.com --workers 20
+```
+
 ## LinkedIn Mode
 
 ```bash
