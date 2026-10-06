@@ -5,8 +5,9 @@ import os
 import re
 import time
 import hashlib
+import threading
 import unicodedata
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from io import BytesIO
 from urllib.parse import urlparse, unquote, parse_qs, urljoin
@@ -141,6 +142,11 @@ _internal_path_re = re.compile("|".join(INTERNAL_PATH_PATTERNS))
 _email_re = re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
 _user_re = re.compile(r"\b(?:[A-Za-z0-9_.-]{2,}\\[A-Za-z0-9_.-]{2,}|[A-Za-z0-9_.-]{3,})\b")
 
+_linkedin_profile_url_re = re.compile(
+    r"https?://(?:[a-z0-9-]+\.)*linkedin\.com/in/[^&?#\s]+",
+    flags=re.IGNORECASE,
+)
+
 KEYWORDS = [
     "password", "passwd", "pwd",
     "token", "apikey", "api_key", "secret", "client_secret",
@@ -254,15 +260,10 @@ def get_linkedin_result_url(result: dict) -> str:
     subdomains such as uk.linkedin.com, in.linkedin.com, etc.
     """
 
-    linkedin_pattern = re.compile(
-        r"https?://(?:[a-z0-9-]+\.)*linkedin\.com/in/[^&?#\s]+",
-        flags=re.IGNORECASE,
-    )
-
     # First check the normal result URL.
     link = unquote((result.get("link") or "").strip())
 
-    match = linkedin_pattern.search(link)
+    match = _linkedin_profile_url_re.search(link)
     if match:
         return match.group(0)
 
@@ -272,7 +273,17 @@ def get_linkedin_result_url(result: dict) -> str:
         (result.get("about_page_link") or "").strip()
     )
 
-    match = linkedin_pattern.search(about_link)
+    match = _linkedin_profile_url_re.search(about_link)
+    if match:
+        return match.group(0)
+
+    # Neither field was a direct LinkedIn URL. SerpAPI/Google
+    # sometimes returns an indirect /goto? redirect instead
+    # (the same quirk file search results have) — resolve it
+    # before giving up.
+    resolved = resolve_serpapi_result_url(link)
+
+    match = _linkedin_profile_url_re.search(resolved)
     if match:
         return match.group(0)
 
@@ -756,9 +767,9 @@ class MetaRow:
     Error: str
 
 
-def http_fetch(url: str, timeout: int, max_bytes: int, user_agent: str):
+def http_fetch(url: str, timeout: int, max_bytes: int, user_agent: str, session: requests.Session):
     headers = {"User-Agent": user_agent}
-    with requests.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True) as r:
+    with session.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=True) as r:
         r.raise_for_status()
 
         ct = r.headers.get("Content-Type", "").split(";")[0].strip()
@@ -782,25 +793,19 @@ def http_fetch(url: str, timeout: int, max_bytes: int, user_agent: str):
         content = buf.getvalue()
         return content, ct, str(total), lm, etag
         
-def discover_document_pages(domain, user_agent, timeout=5):
+def discover_document_pages(domain, user_agent, session, timeout=5, max_workers=10):
     discovered = set()
     timed_out = 0
     unavailable = 0
     total_paths = len(DOCUMENT_PATHS)
+    completed = 0
+    progress_lock = threading.Lock()
 
-    for i, path in enumerate(DOCUMENT_PATHS, 1):
-        # Update progress on a single terminal line
-        print(
-            f"\r{CYAN}[+]{RESET} Checking common document paths... "
-            f"[{i}/{total_paths}] | Found: {len(discovered)}",
-            end="",
-            flush=True
-        )
-
+    def check(path):
         url = f"https://{domain}{path}"
 
         try:
-            r = requests.get(
+            r = session.get(
                 url,
                 headers={"User-Agent": user_agent},
                 timeout=timeout,
@@ -808,21 +813,40 @@ def discover_document_pages(domain, user_agent, timeout=5):
             )
 
             if r.status_code == 200:
-                discovered.add(r.url)
-            else:
-                unavailable += 1
+                return ("ok", r.url)
+            return ("unavailable", None)
 
         except requests.exceptions.Timeout:
-            timed_out += 1
+            return ("timeout", None)
 
         except requests.exceptions.RequestException:
-            unavailable += 1
+            return ("unavailable", None)
 
-    # Refresh once more so the final count reflects the last request
-    print(
-        f"\r{CYAN}[+]{RESET} Checking common document paths... "
-        f"[{total_paths}/{total_paths}] | Found: {len(discovered)}"
-    )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(check, path) for path in DOCUMENT_PATHS]
+
+        for future in as_completed(futures):
+            status, url = future.result()
+
+            with progress_lock:
+                completed += 1
+
+                if status == "ok":
+                    discovered.add(url)
+                elif status == "timeout":
+                    timed_out += 1
+                else:
+                    unavailable += 1
+
+                # Update progress on a single terminal line
+                print(
+                    f"\r{CYAN}[+]{RESET} Checking common document paths... "
+                    f"[{completed}/{total_paths}] | Found: {len(discovered)}",
+                    end="",
+                    flush=True
+                )
+
+    print()
 
     if timed_out:
         warning(f"{timed_out} document path checks timed out.")
@@ -1266,6 +1290,70 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
     return urls
 
 
+def build_metadata_row(url: str, args, session: requests.Session) -> MetaRow:
+    ext = guess_ext(url) or "unknown"
+    filename = safe_filename_from_url(url)
+
+    row = MetaRow(
+        URL=url,
+        FileType=ext,
+        FileName=filename,
+        Platform=detect_platform(url),
+        SizeBytes="",
+        ContentType="",
+        SHA256="",
+
+        Title="",
+        Author="",
+        Creator="",
+        Producer="",
+        Application="",
+        Company="",
+        LastModifiedBy="",
+        Created="",
+        Modified="",
+
+        HttpLastModified="",
+        HttpETag="",
+
+        Encoding="",
+        Findings="",
+
+        InternalPathIndicators="",
+        Error="",
+    )
+
+    try:
+        content, ct, size_bytes, lm, etag = http_fetch(
+            url=url, timeout=args.timeout, max_bytes=args.max_bytes,
+            user_agent=args.user_agent, session=session
+        )
+        ct = ct.split(";")[0].strip()
+        row.ContentType = ct
+        # If extension unknown, try to infer from Content-Type
+        if ext not in EXTRACTORS and ct in CONTENT_TYPE_MAP:
+            ext = CONTENT_TYPE_MAP[ct]
+            row.FileType = ext
+        row.SizeBytes = size_bytes
+        row.HttpLastModified = lm
+        row.HttpETag = etag
+        row.SHA256 = sha256_bytes(content)
+
+        extractor = EXTRACTORS.get(ext)
+        if not extractor:
+            row.Error = f"No extractor for extension: {ext}"
+        else:
+            md = extractor(content)
+            for k, v in md.items():
+                if hasattr(row, k) and v is not None:
+                    setattr(row, k, str(v))
+
+    except Exception as e:
+        row.Error = str(e)
+
+    return row
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -1333,10 +1421,11 @@ def main():
         default="pdf,docx,xlsx,pptx,doc,xls",
         help="Comma-separated file extensions (default: pdf,docx,xlsx,pptx,doc,xls). Add csv,txt if desired."
     )
-    parser.add_argument("--max", type=int, default=700, help="Max SerpAPI results per type (default: 700)")
+    parser.add_argument("--max", type=int, default=400, help="Max SerpAPI results per type (default: 400)")
     parser.add_argument("--sleep", type=float, default=0.5, help="Sleep between SerpAPI requests (default: 0.5)")
     parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout seconds (default: 20)")
     parser.add_argument("--max-bytes", type=int, default=20_000_000, help="Max download size per file (default: 20MB)")
+    parser.add_argument("--workers", type=int, default=10, help="Concurrent worker threads for file downloads/probing (default: 10)")
     parser.add_argument("--user-agent", default="Mozilla/5.0 (compatible; FileEnum/3.1)",
                         help="User-Agent for HTTP fetches")
     parser.add_argument("--out-urls", default=None, help="Output file for URLs (default: <domain>-URLs.txt)")
@@ -1460,6 +1549,8 @@ def main():
     types = [t.strip().lower().lstrip(".") for t in args.types.split(",") if t.strip()]
     all_urls: set[str] = set()
 
+    session = requests.Session()
+
     for ext in types:
         all_urls |= serp_search_filetype(args.domain, ext, api_key, args.max, args.sleep)
 
@@ -1468,7 +1559,9 @@ def main():
         document_pages = discover_document_pages(
             args.domain,
             args.user_agent,
-            timeout=5
+            session,
+            timeout=5,
+            max_workers=args.workers
         )
 
         all_urls.update(
@@ -1496,69 +1589,24 @@ def main():
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
-        for idx, url in enumerate(sorted_urls, 1):
-            ext = guess_ext(url) or "unknown"
-            filename = safe_filename_from_url(url)
+        rows_by_url = {}
+        completed = 0
 
-            row = MetaRow(
-                URL=url,
-                FileType=ext,
-                FileName=filename,
-                Platform=detect_platform(url),
-                SizeBytes="",
-                ContentType="",
-                SHA256="",
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(build_metadata_row, url, args, session): url
+                for url in sorted_urls
+            }
 
-                Title="",
-                Author="",
-                Creator="",
-                Producer="",
-                Application="",
-                Company="",
-                LastModifiedBy="",
-                Created="",
-                Modified="",
+            for future in as_completed(futures):
+                url = futures[future]
+                rows_by_url[url] = future.result()
 
-                HttpLastModified="",
-                HttpETag="",
+                completed += 1
+                info(f"({completed}/{len(sorted_urls)}) Processed: {url}")
 
-                Encoding="",
-                Findings="",
-
-                InternalPathIndicators="",
-                Error="",
-            )
-
-            info(f"({idx}/{len(sorted_urls)}) Processing: {url}")
-
-            try:
-                content, ct, size_bytes, lm, etag = http_fetch(
-                    url=url, timeout=args.timeout, max_bytes=args.max_bytes, user_agent=args.user_agent
-                )
-                ct = ct.split(";")[0].strip()
-                row.ContentType = ct
-                # If extension unknown, try to infer from Content-Type
-                if ext not in EXTRACTORS and ct in CONTENT_TYPE_MAP:
-                    ext = CONTENT_TYPE_MAP[ct]
-                    row.FileType = ext
-                row.SizeBytes = size_bytes
-                row.HttpLastModified = lm
-                row.HttpETag = etag
-                row.SHA256 = sha256_bytes(content)
-
-                extractor = EXTRACTORS.get(ext)
-                if not extractor:
-                    row.Error = f"No extractor for extension: {ext}"
-                else:
-                    md = extractor(content)
-                    for k, v in md.items():
-                        if hasattr(row, k) and v is not None:
-                            setattr(row, k, str(v))
-
-            except Exception as e:
-                row.Error = str(e)
-
-            writer.writerow(asdict(row))
+        for url in sorted_urls:
+            writer.writerow(asdict(rows_by_url[url]))
 
     success(f"Report saved to {out_csv}")
 
