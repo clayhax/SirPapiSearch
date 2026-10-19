@@ -26,6 +26,12 @@ Thumbs.db
 linkedin-emails.txt
 linkedin-profiles.csv
 linkedin-names.txt
+zoominfo-emails.txt
+zoominfo-profiles.csv
+zoominfo-names.txt
+employees-emails.txt
+employees-profiles.csv
+employees-names.txt
 
 # Environment / secrets
 .env

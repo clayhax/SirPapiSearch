@@ -8,6 +8,7 @@ import hashlib
 import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
 from dataclasses import dataclass, asdict
 from io import BytesIO
 from urllib.parse import urlparse, unquote, parse_qs, urljoin
@@ -42,16 +43,17 @@ def notice(message):
 def warning(message):
     print(f"{YELLOW}[!]{RESET} {message}")
 
-
-class SearchInterrupted(KeyboardInterrupt):
-    """Ctrl-C during URL collection, carrying the URLs found so far."""
-
-    def __init__(self, partial_urls: set[str]):
-        super().__init__()
-        self.partial_urls = partial_urls
-
 def error(message):
     print(f"{RED}[-]{RESET} {message}")
+
+
+class SearchInterrupted(KeyboardInterrupt):
+    """Ctrl-C during a search, carrying the results collected so far."""
+
+    def __init__(self, partial_results):
+        super().__init__()
+        self.partial_results = partial_results
+
     
 def serp_search_with_retry(
     params: dict,
@@ -101,7 +103,7 @@ def print_banner():
 
 """
     print(CYAN + banner + RESET)
-    print(WHITE + "        SirPapiSearch v3.2 | by cl4yh4x" + RESET)
+    print(WHITE + "        SirPapiSearch v3.3 | by cl4yh4x" + RESET)
     print()
 
 # ---------------- SerpAPI Key Configuration ----------------
@@ -157,6 +159,12 @@ _linkedin_profile_url_re = re.compile(
     flags=re.IGNORECASE,
 )
 
+# ZoomInfo person pages: https://www.zoominfo.com/p/John-Smith/1234567890
+_zoominfo_profile_url_re = re.compile(
+    r"https?://(?:[a-z0-9-]+\.)*zoominfo\.com/p/[^&?#\s]+",
+    flags=re.IGNORECASE,
+)
+
 KEYWORDS = [
     "password", "passwd", "pwd",
     "token", "apikey", "api_key", "secret", "client_secret",
@@ -197,7 +205,7 @@ DOCUMENT_PATHS = [
 ]
 
 
-# ---------------- LinkedIn (SerpAPI Google results only) ----------------
+# ---------------- Employee Sources (SerpAPI Google results only) ----------------
 HONORIFICS = {
     "mr", "mrs", "ms", "miss", "mx", "dr", "prof", "sir", "madam", "dame",
 }
@@ -264,18 +272,58 @@ def clean_linkedin_title_to_name(title: str) -> str:
 
     return t
 
-def get_linkedin_result_url(result: dict) -> str:
+def clean_zoominfo_title_to_name(title: str) -> str:
     """
-    Extract a LinkedIn /in/ profile URL from a SerpAPI result.
+    Handles common ZoomInfo person-page title shapes, e.g.:
+      'John Doe - Director of IT - CompanyName | ZoomInfo'
+      'John Doe Email & Phone Number | CompanyName Director of IT Contact Information'
+      "John Doe's Email & Phone Number | CompanyName"
+      'John Doe - CompanyName - ZoomInfo'
+      'Contact John Doe, Email - CompanyName'
+      'Who is John Doe - Director of IT at CompanyName'
 
-    Supports www.linkedin.com and country-specific LinkedIn
-    subdomains such as uk.linkedin.com, in.linkedin.com, etc.
+    Unrecognized shapes are caught by the slug cross-check in
+    search_employee_names, since ZoomInfo slugs are always the name.
+    """
+    if not title:
+        return ""
+
+    t = title.strip().replace("’", "'")
+
+    # Strip trailing branding
+    t = re.sub(r"\s*[-|·:]\s*ZoomInfo(?:\.com)?\s*$", "", t, flags=re.IGNORECASE)
+
+    # Strip leading "Contact " / "Who is "
+    t = re.sub(r"^\s*(?:Contact|Who\s+is)\s+", "", t, flags=re.IGNORECASE)
+
+    # Split on dash/pipe/dot separators and take first segment as candidate name
+    t = re.split(r"\s+[-–—|·]\s+", t, maxsplit=1)[0].strip()
+
+    # Strip "Email & Phone Number" / "'s Contact Information" / ", Email" tails
+    t = re.sub(
+        r"(?:'s)?[\s,]+(?:Email|Phone|Contact)\b.*$",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+
+    # Collapse whitespace
+    t = re.sub(r"\s{2,}", " ", t).strip()
+
+    return t
+
+def get_profile_result_url(result: dict, profile_url_re: re.Pattern) -> str:
+    """
+    Extract a profile URL matching profile_url_re from a SerpAPI result.
+
+    Matches any subdomain, so country-specific LinkedIn hosts such as
+    uk.linkedin.com or in.linkedin.com are supported.
     """
 
     # First check the normal result URL.
     link = unquote((result.get("link") or "").strip())
 
-    match = _linkedin_profile_url_re.search(link)
+    match = profile_url_re.search(link)
     if match:
         return match.group(0)
 
@@ -285,17 +333,17 @@ def get_linkedin_result_url(result: dict) -> str:
         (result.get("about_page_link") or "").strip()
     )
 
-    match = _linkedin_profile_url_re.search(about_link)
+    match = profile_url_re.search(about_link)
     if match:
         return match.group(0)
 
-    # Neither field was a direct LinkedIn URL. SerpAPI/Google
+    # Neither field was a direct profile URL. SerpAPI/Google
     # sometimes returns an indirect /goto? redirect instead
     # (the same quirk file search results have) — resolve it
     # before giving up.
     resolved = resolve_serpapi_result_url(link)
 
-    match = _linkedin_profile_url_re.search(resolved)
+    match = profile_url_re.search(resolved)
     if match:
         return match.group(0)
 
@@ -406,6 +454,120 @@ def parse_linkedin_slug(link: str) -> tuple[str, str]:
     except Exception:
         return ("", "")
 
+def parse_zoominfo_slug(link: str) -> tuple[str, str]:
+    """
+    Parse /p/John-Smith/1234567890 into ("John", "Smith"). The slug is
+    run through parse_first_last so particles and suffixes are handled.
+    """
+    try:
+        parts = urlparse(link).path.strip("/").split("/")
+
+        if len(parts) < 2 or parts[0].lower() != "p":
+            return ("", "")
+
+        tokens = [
+            t for t in unquote(parts[1]).split("-")
+            if t and not t.isdigit()
+        ]
+
+        return parse_first_last(" ".join(tokens))
+
+    except Exception:
+        return ("", "")
+
+
+def company_pattern(company: str) -> re.Pattern:
+    """
+    Regex matching the company name with any spacing/punctuation between
+    its characters, so "FRSecure" also matches "FR Secure" and "AT&T"
+    matches "ATT".
+    """
+    chars = normalize_for_email(company)
+    return re.compile(r"[\W_]*".join(re.escape(c) for c in chars), re.IGNORECASE)
+
+
+# Text following a company mention that marks it as part of a
+# "similar people" sidebar entry rather than the person's own history:
+#   "Jane Roe. Analyst. Company. Phone. Email."
+#   "Company · JR. United States flag for contact location."
+_sidebar_after_re = re.compile(
+    r"^\s*(?:\.\s*)?(?:Phone|Email)\.|^\s*·\s*[A-Z]{2}\b|^.{0,60}flag for contact location",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# "Company. 2016-2019." / "Company. 2024-." job-history entries
+_history_after_re = re.compile(r"^\s*\.\s*(?:19|20)\d{2}\s*-")
+
+# Prose mention such as "role at Company", "establishing Company"
+_prose_before_re = re.compile(r"\b[a-z]+[\s,]*$")
+
+
+def mentions_company_as_employer(title: str, snippet: str, company_re: re.Pattern) -> bool:
+    """
+    True when a result ties the person to the company, as a current or
+    former employee: the title names it ("... at Company"), or the snippet
+    lists it in a job-history entry or mentions it in prose about the
+    person. Mentions that belong to sidebar entries for other people are
+    ignored.
+    """
+    if company_re.search(title):
+        return True
+
+    for m in company_re.finditer(snippet):
+        before = snippet[max(0, m.start() - 30):m.start()]
+        after = snippet[m.end():m.end() + 80]
+
+        if _history_after_re.match(after):
+            return True
+
+        if _sidebar_after_re.match(after):
+            continue
+
+        if _prose_before_re.search(before):
+            return True
+
+    return False
+
+
+@dataclass(frozen=True)
+class EmployeeSource:
+    key: str
+    label: str
+    query: str                       # Google query; {company} is filled in
+    profile_url_re: re.Pattern       # identifies person/profile result URLs
+    title_to_name: Callable[[str], str]
+    slug_to_name: Callable[[str], tuple[str, str]]
+    non_person_re: re.Pattern        # rejects directory/company titles
+    slug_is_name: bool = False       # URL slug is always the real name; prefer it on mismatch
+    require_company_match: bool = False  # title/snippet must tie the person to the company
+
+
+EMPLOYEE_SOURCES = {
+    "linkedin": EmployeeSource(
+        key="linkedin",
+        label="LinkedIn",
+        query='site:linkedin.com/in/ "{company}"',
+        profile_url_re=_linkedin_profile_url_re,
+        title_to_name=clean_linkedin_title_to_name,
+        slug_to_name=parse_linkedin_slug,
+        non_person_re=re.compile(r"\b(linkedin|profiles?|people)\b", re.IGNORECASE),
+    ),
+    "zoominfo": EmployeeSource(
+        key="zoominfo",
+        label="ZoomInfo",
+        query='site:zoominfo.com/p/ "{company}"',
+        profile_url_re=_zoominfo_profile_url_re,
+        title_to_name=clean_zoominfo_title_to_name,
+        slug_to_name=parse_zoominfo_slug,
+        non_person_re=re.compile(
+            r"\b(zoominfo|profiles?|people|employees?|directory|overview|company)\b",
+            re.IGNORECASE,
+        ),
+        slug_is_name=True,
+        require_company_match=True,
+    ),
+}
+
 def normalize_for_email(s: str) -> str:
     s = strip_accents(s).lower()
     s = s.replace(" ", "")
@@ -439,27 +601,42 @@ def render_email(fmt: str, first: str, last: str, email_domain: str | None = Non
     return out
 
 
-def linkedin_search_names(
+def search_employee_names(
+    source: EmployeeSource,
     company: str,
     api_key: str,
     max_results: int,
-    sleep_s: float
-) -> list[tuple[str, str, str, str]]:
+    sleep_s: float,
+    company_filter: bool = True,
+) -> list[tuple[str, str, str, str, str, str]]:
+    """
+    Page through Google results for one employee source and return
+    (source_key, profile_url, google_title, snippet, first, last) tuples.
 
-    query = f'site:linkedin.com/in/ "{company}"'
+    Raises SearchInterrupted (carrying the tuples collected so far)
+    on Ctrl-C so callers can skip any remaining sources.
+    """
+
+    tag = f"({source.key})"
+    query = source.query.format(company=company)
 
     urls_seen = set()
     results_out = []
 
     raw_results = 0
-    linkedin_results = 0
-    
+    profile_results = 0
+    off_company = 0
+    company_re = company_pattern(company)
+
     consecutive_empty = 0
     max_consecutive_empty = 10
+    interrupted = False
+
+    info(f"{tag} Searching {source.label}: {query}")
 
     try:
         for start in range(0, max_results, 10):
-            info(f"(linkedin) Fetching results from offset {start}")
+            info(f"{tag} Fetching results from offset {start}")
 
             params = {
                 "engine": "google",
@@ -471,29 +648,29 @@ def linkedin_search_names(
 
             results = serp_search_with_retry(
                 params,
-                context=f"(linkedin) offset {start}:",
+                context=f"{tag} offset {start}:",
             )
 
             if results is None:
                 warning(
-                    "(linkedin) Stopping search and preserving "
+                    f"{tag} Stopping search and preserving "
                     "results collected so far."
                 )
                 break
-                
+
             organic = results.get("organic_results", [])
 
             if not organic:
                 consecutive_empty += 1
 
                 notice(
-                    f"(linkedin) Empty result page at offset {start} "
+                    f"{tag} Empty result page at offset {start} "
                     f"({consecutive_empty}/{max_consecutive_empty})."
                 )
 
                 if consecutive_empty >= max_consecutive_empty:
                     notice(
-                        f"(linkedin) No results across "
+                        f"{tag} No results across "
                         f"{max_consecutive_empty} consecutive pages. "
                         f"Stopping."
                     )
@@ -508,65 +685,86 @@ def linkedin_search_names(
             for r in organic:
                 raw_results += 1
 
-                link = get_linkedin_result_url(r)
+                link = get_profile_result_url(r, source.profile_url_re)
                 title = (r.get("title") or "").strip()
+                snippet = (r.get("snippet") or "").strip()
 
                 if not link:
                     continue
 
-                linkedin_results += 1
+                profile_results += 1
 
                 if link in urls_seen:
                     continue
 
                 urls_seen.add(link)
 
-                name_chunk = clean_linkedin_title_to_name(title)
-                if not name_chunk:
-                    continue
-
-                # Filter obvious non-person titles
-                if re.search(
-                    r"\b(linkedin|profiles?|people)\b",
-                    name_chunk,
-                    re.IGNORECASE,
-                ):
-                    continue
-
+                # Drop results that don't tie the person to the company, e.g.
+                # ZoomInfo pages for other companies' staff that only list
+                # the company in a "similar people" sidebar.
                 if (
-                    "member" in name_chunk.lower()
-                    and "linkedin" in name_chunk.lower()
+                    company_filter
+                    and source.require_company_match
+                    and not mentions_company_as_employer(title, snippet, company_re)
                 ):
+                    off_company += 1
                     continue
+
+                name_chunk = source.title_to_name(title)
+
+                # Ignore obvious non-person titles; the profile URL
+                # itself is a person page, so the slug can still be used.
+                if name_chunk and source.non_person_re.search(name_chunk):
+                    name_chunk = ""
 
                 first, last = parse_first_last(name_chunk)
 
-                # Fallback to LinkedIn slug only if Google title parsing failed
-                if not first or not last:
-                    slug_first, slug_last = parse_linkedin_slug(link)
+                slug_first, slug_last = source.slug_to_name(link)
 
-                    if slug_first and slug_last:
-                        first = slug_first
-                        last = slug_last
-                    else:
-                        continue
+                # Fallback to the URL slug if Google title parsing failed,
+                # or, for sources whose slug is always the person's name,
+                # if the title-derived name disagrees with it.
+                if slug_first and slug_last and (
+                    not first
+                    or not last
+                    or (
+                        source.slug_is_name
+                        and (normalize_for_email(first), normalize_for_email(last))
+                        != (normalize_for_email(slug_first), normalize_for_email(slug_last))
+                    )
+                ):
+                    first = slug_first
+                    last = slug_last
+
+                if not first or not last:
+                    continue
 
                 # Reject abbreviated surnames such as "Tony S." / "Lisa S."
                 if len(normalize_for_email(last)) < 2:
                     continue
 
-                results_out.append((link, title, first, last))
+                results_out.append((source.key, link, title, snippet, first, last))
 
             time.sleep(sleep_s)
     except KeyboardInterrupt:
         print()
         warning(
-            "(linkedin) Search interrupted by user. "
+            f"{tag} Search interrupted by user. "
             "Preserving results collected so far."
         )
+        interrupted = True
 
-    notice(f"(linkedin) Raw Google results: {raw_results}")
-    notice(f"(linkedin) LinkedIn profile results: {linkedin_results}")
+    notice(f"{tag} Raw Google results: {raw_results}")
+    notice(f"{tag} {source.label} profile results: {profile_results}")
+    if off_company:
+        notice(
+            f"{tag} Skipped {off_company} results not tied to "
+            f"'{company}' (disable with --no-company-filter)."
+        )
+    success(f"{tag} Parsed {len(results_out)} {source.label} name hits (first+last).")
+
+    if interrupted:
+        raise SearchInterrupted(results_out)
 
     return results_out
 
@@ -1409,9 +1607,18 @@ def main():
 
       LinkedIn email enumeration, multiple candidate formats:
         python3 SirPapiSearch.py example.com --linkedin --company "Example Company" --email-format "{f}{last},{first}.{last},{first}{l}"
+
+      ZoomInfo email enumeration:
+        python3 SirPapiSearch.py example.com --zoominfo --company "Example Company" --email-format "{f}{last}"
+
+      Employee enumeration across all sources (LinkedIn + ZoomInfo):
+        python3 SirPapiSearch.py example.com --employees --company "Example Company" --email-format "{f}{last}"
+
+      Employee enumeration, selected sources only:
+        python3 SirPapiSearch.py example.com --employees --sources zoominfo --company "Example Company" --email-format "{f}{last}"
     """,
     )
-    parser.add_argument("domain", help="Target domain for file enumeration OR email domain for --linkedin mode (e.g. example.com)")
+    parser.add_argument("domain", help="Target domain for file enumeration OR email domain for employee modes (e.g. example.com)")
 
     parser.add_argument(
         "--api-key",
@@ -1425,38 +1632,65 @@ def main():
         help="Suppress the SirPapiSearch banner"
     )
 
-    # LinkedIn mode: OFF by default. When enabled, tool will ONLY run LinkedIn mode and exit.
-    parser.add_argument(
+    # Employee modes: OFF by default. When enabled, tool will ONLY run
+    # employee enumeration and exit.
+    employee_modes = parser.add_mutually_exclusive_group()
+    employee_modes.add_argument(
         "--linkedin",
         action="store_true",
         help="LinkedIn email enumeration mode (SerpAPI Google results only). Requires --company and --email-format. Exits after writing emails."
     )
+    employee_modes.add_argument(
+        "--zoominfo",
+        action="store_true",
+        help="ZoomInfo email enumeration mode (SerpAPI Google results only). Requires --company and --email-format. Exits after writing emails."
+    )
+    employee_modes.add_argument(
+        "--employees",
+        action="store_true",
+        help="Employee email enumeration across multiple sources (default: all; see --sources). "
+             "Requires --company and --email-format. Exits after writing emails."
+    )
+    parser.add_argument(
+        "--sources",
+        default=None,
+        help="Comma-separated sources for --employees "
+             f"(choices: {','.join(EMPLOYEE_SOURCES)}; default: all). "
+             "--max applies per source."
+    )
     parser.add_argument("--company", default=None,
-                        help="Company name to search in LinkedIn results (required with --linkedin)")
+                        help="Company name to search for (required with --linkedin/--zoominfo/--employees)")
+    parser.add_argument(
+        "--no-company-filter",
+        action="store_true",
+        help="Keep ZoomInfo results whose title/snippet don't tie the person to --company "
+             "(by default they are skipped as likely other companies' staff)"
+    )
     parser.add_argument("--email-format", default=None,
-                        help="REQUIRED with --linkedin. Template supports {first},{last},{f},{l}. "
+                        help="REQUIRED with --linkedin/--zoominfo/--employees. Template supports {first},{last},{f},{l}. "
                              "Accepts a comma-separated list to generate multiple candidate "
                              "formats per contact in one pass, e.g. "
                              "'{f}{last},{first}.{last},{first}{l}'. "
                              "Examples: '{f}{last}@domain.com', '{first}{last}@domain.com', '{first}.{last}' (appends @<domain>).")
     # Optional override; by default we use the positional domain argument as the email domain.
     parser.add_argument("--email-domain", default=None,
-                        help="Optional override: email domain to use for --linkedin mode. If omitted, uses positional <domain> argument.")
-    parser.add_argument("--out-emails", default="linkedin-emails.txt",
-                        help="Output file for generated emails (default: linkedin-emails.txt)")
-                        
+                        help="Optional override: email domain to use for employee modes. If omitted, uses positional <domain> argument.")
+    parser.add_argument("--out-emails", default=None,
+                        help="Output file for generated emails (default: <mode>-emails.txt, "
+                             "where <mode> is linkedin, zoominfo or employees)")
+
     parser.add_argument(
         "--out-profiles",
-        default="linkedin-profiles.csv",
-        help="Output CSV for LinkedIn source profiles (default: linkedin-profiles.csv)"
+        default=None,
+        help="Output CSV for source profiles (default: <mode>-profiles.csv)"
     )
-    
+
     parser.add_argument(
     "--out-names",
-    default="linkedin-names.txt",
+    default=None,
     help=(
         "Output file for discovered first/last name pairs "
-        "(default: linkedin-names.txt)."
+        "(default: <mode>-names.txt)."
     ),
     )
 
@@ -1487,12 +1721,40 @@ def main():
             "or hardcode HARDCODED_SERPAPI_KEY in the script."
         )
         
-    # ---------------- LinkedIn Mode (only if explicitly requested) ----------------
-    if args.linkedin:
+    if args.sources and not args.employees:
+        raise SystemExit("[-] --sources can only be used with --employees")
+
+    # ---------------- Employee Modes (only if explicitly requested) ----------------
+    if args.linkedin or args.zoominfo or args.employees:
+        if args.linkedin:
+            mode, source_keys = "linkedin", ["linkedin"]
+        elif args.zoominfo:
+            mode, source_keys = "zoominfo", ["zoominfo"]
+        else:
+            mode = "employees"
+            source_keys = [
+                s.strip().lower()
+                for s in (args.sources or ",".join(EMPLOYEE_SOURCES)).split(",")
+                if s.strip()
+            ]
+            # Keep order, drop duplicates
+            source_keys = list(dict.fromkeys(source_keys))
+
+            unknown = [s for s in source_keys if s not in EMPLOYEE_SOURCES]
+            if unknown or not source_keys:
+                raise SystemExit(
+                    f"[-] Unknown --sources value(s): {', '.join(unknown) or '(none)'}. "
+                    f"Choices: {', '.join(EMPLOYEE_SOURCES)}"
+                )
+
         if not args.company:
-            raise SystemExit("[-] --company is required when using --linkedin")
+            raise SystemExit(f"[-] --company is required when using --{mode}")
         if not args.email_format:
-            raise SystemExit("[-] --email-format is required when using --linkedin")
+            raise SystemExit(f"[-] --email-format is required when using --{mode}")
+
+        out_emails = args.out_emails or f"{mode}-emails.txt"
+        out_profiles = args.out_profiles or f"{mode}-profiles.csv"
+        out_names = args.out_names or f"{mode}-names.txt"
 
         # Comma-separated list of candidate formats, e.g.
         # "{f}{last},{first}.{last},{first}{l}"
@@ -1514,17 +1776,33 @@ def main():
                 f"Use a full domain like '{effective_email_domain}.com' or pass --email-domain."
             )
             
-        contacts = linkedin_search_names(
-            company=args.company,
-            api_key=api_key,
-            max_results=args.max,
-            sleep_s=args.sleep
-        )
+        contacts = []
 
-        success(f"(linkedin) Parsed {len(contacts)} LinkedIn name hits (first+last).")
+        try:
+            for key in source_keys:
+                contacts.extend(
+                    search_employee_names(
+                        source=EMPLOYEE_SOURCES[key],
+                        company=args.company,
+                        api_key=api_key,
+                        max_results=args.max,
+                        sleep_s=args.sleep,
+                        company_filter=not args.no_company_filter,
+                    )
+                )
+        except KeyboardInterrupt as e:
+            contacts.extend(getattr(e, "partial_results", []))
+            if len(source_keys) > 1:
+                warning("Skipping remaining sources.")
+
+        if len(source_keys) > 1:
+            success(
+                f"({mode}) Parsed {len(contacts)} name hits across "
+                f"{len(source_keys)} sources: {', '.join(source_keys)}."
+            )
 
         emails = set()
-        for (url, title, first, last) in contacts:
+        for (source, url, title, snippet, first, last) in contacts:
             for fmt in email_formats:
                 try:
                     emails.add(
@@ -1537,63 +1815,68 @@ def main():
                     )
                 except Exception as e:
                     error(
-                        f"(linkedin) Failed rendering email for "
+                        f"({source}) Failed rendering email for "
                         f"{first} {last} with format '{fmt}' ({url}): {e}"
                     )
 
         sorted_emails = sorted(emails)
-        # write linkedin-emails.txt
-        with open(args.out_emails, "w", encoding="utf-8") as f:
+        # write <mode>-emails.txt
+        with open(out_emails, "w", encoding="utf-8") as f:
             for e in sorted_emails:
                 f.write(e + "\n")
 
         success(
-            f"Emails saved to {args.out_emails} "
+            f"Emails saved to {out_emails} "
             f"({len(sorted_emails)} unique across {len(email_formats)} format(s))."
         )
-        
-        # Write LinkedIn profile/source information for auditing
-        with open(args.out_profiles, "w", newline="", encoding="utf-8") as csvfile:
+
+        # Write profile/source information for auditing
+        with open(out_profiles, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
 
             writer.writerow([
-                "LinkedInURL",
+                "Source",
+                "ProfileURL",
                 "GoogleTitle",
                 "FirstName",
-                "LastName"
+                "LastName",
+                "Snippet"
             ])
 
-            for url, title, first, last in contacts:
+            for source, url, title, snippet, first, last in contacts:
                 writer.writerow([
+                    source,
                     url,
                     title,
                     first,
-                    last
+                    last,
+                    snippet
                 ])
 
         success(
-        f"LinkedIn profiles saved to {args.out_profiles} "
+        f"Profiles saved to {out_profiles} "
         f"({len(contacts)} profiles)."
         )
 
-        # Write unique first/last name pairs for later email mangling
-        names = {
-            f"{first} {last}"
-            for _, _, first, last in contacts
-        }
+        # Write unique first/last name pairs for later email mangling.
+        # Case-insensitive so the same person found by several sources
+        # is only listed once.
+        names = {}
+        for _, _, _, _, first, last in contacts:
+            names.setdefault(f"{first} {last}".lower(), f"{first} {last}")
 
-        sorted_names = sorted(names, key=str.lower)
+        sorted_names = sorted(names.values(), key=str.lower)
 
-        with open(args.out_names, "w", encoding="utf-8") as f:
+        with open(out_names, "w", encoding="utf-8") as f:
             for name in sorted_names:
                 f.write(name + "\n")
 
         success(
-            f"LinkedIn names saved to {args.out_names} "
+            f"Names saved to {out_names} "
             f"({len(sorted_names)} unique names)."
         )
 
-        return  # will not proceed automatically with file enumeration afterward in linkedin mode
+        return  # will not proceed automatically with file enumeration afterward in employee modes
         
     if BeautifulSoup is None:
         warning(
@@ -1636,7 +1919,7 @@ def main():
             )
     except KeyboardInterrupt as e:
         print()
-        all_urls |= getattr(e, "partial_urls", set())
+        all_urls |= getattr(e, "partial_results", set())
         warning(
             "URL collection interrupted by user. Skipping remaining "
             "searches and processing the URLs collected so far "
