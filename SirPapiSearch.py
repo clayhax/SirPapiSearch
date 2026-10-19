@@ -42,6 +42,14 @@ def notice(message):
 def warning(message):
     print(f"{YELLOW}[!]{RESET} {message}")
 
+
+class SearchInterrupted(KeyboardInterrupt):
+    """Ctrl-C during URL collection, carrying the URLs found so far."""
+
+    def __init__(self, partial_urls: set[str]):
+        super().__init__()
+        self.partial_urls = partial_urls
+
 def error(message):
     print(f"{RED}[-]{RESET} {message}")
     
@@ -140,7 +148,9 @@ INTERNAL_PATH_PATTERNS = [
 _internal_path_re = re.compile("|".join(INTERNAL_PATH_PATTERNS))
 
 _email_re = re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
-_user_re = re.compile(r"\b(?:[A-Za-z0-9_.-]{2,}\\[A-Za-z0-9_.-]{2,}|[A-Za-z0-9_.-]{3,})\b")
+# DOMAIN\username tokens only. The lookbehind skips path segments such as
+# C:\Users\bob or \\server\share, which are reported as internal paths.
+_user_re = re.compile(r"(?<![\w.\\:/-])[A-Za-z0-9_.-]{2,}\\[A-Za-z0-9_.$-]{2,}\b")
 
 _linkedin_profile_url_re = re.compile(
     r"https?://(?:[a-z0-9-]+\.)*linkedin\.com/in/[^&?#\s]+",
@@ -203,6 +213,8 @@ PROFESSIONAL_CREDENTIALS = {
     "sphr", "phr", "ccws", "cisr", 
      "phd", "ches", "ms", "rd", "ldn", "cdces"     
 }
+
+TRAILING_NAME_TOKENS = SUFFIXES | PROFESSIONAL_CREDENTIALS
 
 LASTNAME_PARTICLES = {
     "da", "de", "del", "della", "der", "di", "du", "la", "le", "los", "las",
@@ -307,30 +319,15 @@ def parse_first_last(full_name: str) -> tuple[str, str]:
     s = s.replace("\u00A0", " ")
     s = re.sub(r"\s{2,}", " ", s).strip()
 
-    # Strip comma-delimited professional credentials.
-    # Only remove trailing comma-separated segments when every token
-    # is a recognized professional credential.
+    # When the leading comma segment already looks like a full name,
+    # everything after the first comma is credentials or a job title, e.g.
+    # "Jane Doe, CISSP, CISM" / "Sarah Kim, CISSP, Security Lead" -> keep
+    # only the name. Single-token leads ("DOE, JANE") are left alone.
     if "," in s:
         segments = [seg.strip() for seg in s.split(",") if seg.strip()]
 
-        if len(segments) > 1:
-            credential_tokens = []
-
-            for segment in segments[1:]:
-                credential_tokens.extend(
-                    token.rstrip(".").lower()
-                    for token in segment.split()
-                    if token
-                )
-
-            if (
-                credential_tokens
-                and all(
-                    token in PROFESSIONAL_CREDENTIALS
-                    for token in credential_tokens
-                )
-            ):
-                s = segments[0]
+        if segments and len(segments[0].split()) >= 2:
+            s = segments[0]
 
     # Any remaining commas are treated as separators.
     s = re.sub(r",+", " ", s)
@@ -350,8 +347,8 @@ def parse_first_last(full_name: str) -> tuple[str, str]:
     if len(parts) < 2:
         return ("", "")
 
-    # Remove trailing suffixes
-    while parts and parts[-1].rstrip(".").lower() in SUFFIXES:
+    # Remove trailing suffixes and credentials ("John Smith CPA")
+    while parts and parts[-1].rstrip(".").lower() in TRAILING_NAME_TOKENS:
         parts.pop()
 
     if len(parts) < 2:
@@ -987,49 +984,52 @@ def crawl_document_tree(start_pages, domain, user_agent, timeout, max_depth=5, s
     if root_prefixes:
         notice(f"Recursing under discovered document root(s): {sorted(root_prefixes)}")
 
-    while queue:
-        page, depth = queue.pop(0)
+    try:
+        while queue:
+            page, depth = queue.pop(0)
 
-        if page in visited_pages:
-            continue
-
-        if depth > max_depth:
-            continue
-
-        visited_pages.add(page)
-        info(f"Crawling document folder depth={depth}: {page}")
-
-        try:
-            r = requests.get(
-                page,
-                headers={"User-Agent": user_agent},
-                timeout=timeout,
-                allow_redirects=True
-            )
-
-            if r.status_code != 200:
+            if page in visited_pages:
                 continue
 
-            html = r.text
+            if depth > max_depth:
+                continue
 
-            found_files.update(extract_document_links(html, page))
-            found_files.update(extract_json_file_urls(html))
+            visited_pages.add(page)
+            info(f"Crawling document folder depth={depth}: {page}")
 
-            folder_links = extract_document_folder_links(
-                html=html,
-                base_url=page,
-                domain=domain,
-                root_prefixes=root_prefixes
-            )
+            try:
+                r = requests.get(
+                    page,
+                    headers={"User-Agent": user_agent},
+                    timeout=timeout,
+                    allow_redirects=True
+                )
 
-            for folder_url in folder_links:
-                if folder_url not in visited_pages:
-                    queue.append((folder_url, depth + 1))
+                if r.status_code != 200:
+                    continue
 
-            time.sleep(sleep_s)
+                html = r.text
 
-        except Exception as e:
-            error(f"Failed crawling document folder {page}: {e}")
+                found_files.update(extract_document_links(html, page))
+                found_files.update(extract_json_file_urls(html))
+
+                folder_links = extract_document_folder_links(
+                    html=html,
+                    base_url=page,
+                    domain=domain,
+                    root_prefixes=root_prefixes
+                )
+
+                for folder_url in folder_links:
+                    if folder_url not in visited_pages:
+                        queue.append((folder_url, depth + 1))
+
+                time.sleep(sleep_s)
+
+            except Exception as e:
+                error(f"Failed crawling document folder {page}: {e}")
+    except KeyboardInterrupt:
+        raise SearchInterrupted(found_files)
 
     success(f"Document tree crawl visited {len(visited_pages)} pages.")
     success(f"Document tree crawl found {len(found_files)} file URLs.")
@@ -1263,6 +1263,15 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
     q = f"site:{domain} filetype:{ext}"
     urls = set()
 
+    try:
+        _serp_search_filetype_pages(q, domain, ext, api_key, max_results, sleep_s, urls)
+    except KeyboardInterrupt:
+        raise SearchInterrupted(urls)
+
+    return urls
+
+
+def _serp_search_filetype_pages(q, domain, ext, api_key, max_results, sleep_s, urls: set[str]):
     for start in range(0, max_results, 10):
         info(f"({ext}) Fetching results from offset {start}")
         params = {"engine": "google", "q": q, "api_key": api_key, "start": start, "num": 10}
@@ -1313,10 +1322,8 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
 
             if allowed:
                 urls.add(link)
-                
-        time.sleep(sleep_s)
 
-    return urls
+        time.sleep(sleep_s)
 
 
 def build_metadata_row(url: str, args, session: requests.Session) -> MetaRow:
@@ -1603,28 +1610,37 @@ def main():
 
     session = requests.Session()
 
-    for ext in types:
-        all_urls |= serp_search_filetype(args.domain, ext, api_key, args.max, args.sleep)
+    try:
+        for ext in types:
+            all_urls |= serp_search_filetype(args.domain, ext, api_key, args.max, args.sleep)
 
-    if BeautifulSoup is not None:
+        if BeautifulSoup is not None:
 
-        document_pages = discover_document_pages(
-            args.domain,
-            args.user_agent,
-            session,
-            timeout=5,
-            max_workers=args.workers
-        )
-
-        all_urls.update(
-            crawl_document_tree(
-                start_pages=document_pages,
-                domain=args.domain,
-                user_agent=args.user_agent,
-                timeout=args.timeout,
-                max_depth=5,
-                sleep_s=0.25
+            document_pages = discover_document_pages(
+                args.domain,
+                args.user_agent,
+                session,
+                timeout=5,
+                max_workers=args.workers
             )
+
+            all_urls.update(
+                crawl_document_tree(
+                    start_pages=document_pages,
+                    domain=args.domain,
+                    user_agent=args.user_agent,
+                    timeout=args.timeout,
+                    max_depth=5,
+                    sleep_s=0.25
+                )
+            )
+    except KeyboardInterrupt as e:
+        print()
+        all_urls |= getattr(e, "partial_urls", set())
+        warning(
+            "URL collection interrupted by user. Skipping remaining "
+            "searches and processing the URLs collected so far "
+            "(Ctrl-C again to stop metadata extraction)."
         )
 
     sorted_urls = sorted(all_urls)
@@ -1636,29 +1652,41 @@ def main():
             f.write(u + "\n")
     success(f"URLs saved to {out_urls}")
 
+    rows_by_url = {}
+    completed = 0
+
+    executor = ThreadPoolExecutor(max_workers=args.workers)
+    try:
+        futures = {
+            executor.submit(build_metadata_row, url, args, session): url
+            for url in sorted_urls
+        }
+
+        for future in as_completed(futures):
+            url = futures[future]
+            rows_by_url[url] = future.result()
+
+            completed += 1
+            info(f"({completed}/{len(sorted_urls)}) Processed: {url}")
+
+        executor.shutdown()
+    except KeyboardInterrupt:
+        print()
+        warning(
+            "Metadata extraction interrupted by user. "
+            f"Saving the {len(rows_by_url)}/{len(sorted_urls)} rows processed so far."
+        )
+        # Drop queued downloads; in-flight ones finish in the background.
+        executor.shutdown(wait=False, cancel_futures=True)
+
     fieldnames = list(MetaRow.__annotations__.keys())
     with open(out_csv, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
-        rows_by_url = {}
-        completed = 0
-
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {
-                executor.submit(build_metadata_row, url, args, session): url
-                for url in sorted_urls
-            }
-
-            for future in as_completed(futures):
-                url = futures[future]
-                rows_by_url[url] = future.result()
-
-                completed += 1
-                info(f"({completed}/{len(sorted_urls)}) Processed: {url}")
-
         for url in sorted_urls:
-            writer.writerow(asdict(rows_by_url[url]))
+            if url in rows_by_url:
+                writer.writerow(asdict(rows_by_url[url]))
 
     success(f"Report saved to {out_csv}")
 
