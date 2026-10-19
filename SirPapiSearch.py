@@ -5,6 +5,7 @@ import os
 import re
 import time
 import hashlib
+import secrets
 import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -988,28 +989,87 @@ def http_fetch(url: str, timeout: int, max_bytes: int, user_agent: str, session:
         content = buf.getvalue()
         return content, ct, str(total), lm, etag
         
+def page_fingerprint(html: str, path: str) -> tuple[str, int, str]:
+    """
+    (sha256, length, title) of a page with whitespace and the requested
+    path removed, so a catch-all page that echoes the URL still matches.
+    """
+    text = re.sub(r"\s+", "", html.replace(path, ""))
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    title = re.sub(r"\s+", " ", m.group(1)).strip().lower() if m else ""
+    return (sha256_bytes(text.encode("utf-8", "replace")), len(text), title)
+
+
+def matches_fingerprint(fp: tuple[str, int, str], base: tuple[str, int, str]) -> bool:
+    if fp[0] == base[0]:
+        return True
+
+    # Same title and near-identical size: the same page with
+    # per-request noise such as nonces or CSRF tokens.
+    longest = max(fp[1], base[1], 1)
+    return fp[2] == base[2] and abs(fp[1] - base[1]) / longest <= 0.05
+
+
+def stays_on_path(final_url: str, path: str) -> bool:
+    """
+    True if a (possibly redirected) final URL is still the requested
+    path or below it, e.g. /documents -> /documents/ or /Documents/2024.
+    Landing on "/" or /home means the path doesn't really exist.
+    """
+    final_path = urlparse(final_url).path.rstrip("/").lower()
+    path = path.rstrip("/").lower()
+    return final_path == path or final_path.startswith(path + "/")
+
+
 def discover_document_pages(domain, user_agent, session, timeout=5, max_workers=10):
     discovered = set()
     timed_out = 0
     unavailable = 0
+    redirected = 0
+    catch_all = 0
     total_paths = len(DOCUMENT_PATHS)
     completed = 0
     progress_lock = threading.Lock()
 
-    def check(path):
-        url = f"https://{domain}{path}"
+    def fetch(path):
+        return session.get(
+            f"https://{domain}{path}",
+            headers={"User-Agent": user_agent},
+            timeout=timeout,
+            allow_redirects=True
+        )
 
-        try:
-            r = session.get(
-                url,
-                headers={"User-Agent": user_agent},
-                timeout=timeout,
-                allow_redirects=True
+    # Baseline: request a path that can't exist. If the site answers
+    # it with 200 at that same URL (single-page apps, soft-404 pages),
+    # fingerprint the response so lookalike document paths are skipped.
+    baseline = None
+    bogus_path = f"/sirpapi-{secrets.token_hex(6)}"
+
+    try:
+        r = fetch(bogus_path)
+        if r.status_code == 200 and stays_on_path(r.url, bogus_path):
+            baseline = page_fingerprint(r.text, bogus_path)
+            notice(
+                "Site returns 200 for unknown paths (catch-all); "
+                "document paths matching that page will be skipped."
             )
+    except requests.exceptions.RequestException:
+        pass
 
-            if r.status_code == 200:
-                return ("ok", r.url)
-            return ("unavailable", None)
+    def check(path):
+        try:
+            r = fetch(path)
+
+            if r.status_code != 200:
+                return ("unavailable", None)
+
+            if not stays_on_path(r.url, path):
+                return ("redirected", None)
+
+            if baseline and matches_fingerprint(page_fingerprint(r.text, path), baseline):
+                return ("catch_all", None)
+
+            return ("ok", r.url)
 
         except requests.exceptions.Timeout:
             return ("timeout", None)
@@ -1030,6 +1090,10 @@ def discover_document_pages(domain, user_agent, session, timeout=5, max_workers=
                     discovered.add(url)
                 elif status == "timeout":
                     timed_out += 1
+                elif status == "redirected":
+                    redirected += 1
+                elif status == "catch_all":
+                    catch_all += 1
                 else:
                     unavailable += 1
 
@@ -1048,6 +1112,12 @@ def discover_document_pages(domain, user_agent, session, timeout=5, max_workers=
 
     if unavailable:
         notice(f"{unavailable} document paths were unavailable.")
+
+    if redirected:
+        notice(f"{redirected} document paths redirected elsewhere (e.g. homepage) and were skipped.")
+
+    if catch_all:
+        notice(f"{catch_all} document paths matched the site's not-found page and were skipped.")
 
     return discovered
     
