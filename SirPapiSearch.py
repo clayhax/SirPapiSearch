@@ -1278,8 +1278,17 @@ def crawl_document_tree(start_pages, domain, user_agent, timeout, max_depth=5, s
 
                 html = r.text
 
-                found_files.update(extract_document_links(html, page))
-                found_files.update(extract_json_file_urls(html))
+                # Scope crawler-discovered files the same way SerpAPI
+                # results are scoped, so off-target links on a page
+                # (e.g. a manufacturer PDF referenced in an article)
+                # aren't pulled in and downloaded.
+                page_files = (
+                    extract_document_links(html, page)
+                    | extract_json_file_urls(html)
+                )
+                found_files.update(
+                    u for u in page_files if url_in_scope(u, domain)
+                )
 
                 folder_links = extract_document_folder_links(
                     html=html,
@@ -1527,6 +1536,24 @@ def resolve_serpapi_result_url(link: str, timeout: int = 10) -> str:
 
     return ""
 
+def url_in_scope(url: str, domain: str) -> bool:
+    """
+    True if a URL is in scope for the target: the domain itself, a
+    subdomain of it, or a recognized document platform/CDN. Shared by
+    the SerpAPI search and the document-folder crawler so both apply
+    the same scope rule.
+    """
+    hostname = urlparse(url).netloc.lower()
+    domain_lower = domain.lower().lstrip(".")
+
+    in_domain = (
+        hostname == domain_lower
+        or hostname.endswith("." + domain_lower)
+    )
+
+    return in_domain or bool(detect_platform(url))
+
+
 def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, sleep_s: float) -> set[str]:
     q = f"site:{domain} filetype:{ext}"
     urls = set()
@@ -1542,7 +1569,10 @@ def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, 
 def _serp_search_filetype_pages(q, domain, ext, api_key, max_results, sleep_s, urls: set[str]):
     for start in range(0, max_results, 10):
         info(f"({ext}) Fetching results from offset {start}")
-        params = {"engine": "google", "q": q, "api_key": api_key, "start": start, "num": 10}
+        # filter=0 disables Google's "we omitted some very similar
+        # results" dedup, which is aggressive on filetype: dorks and
+        # otherwise hides indexed files the browser dork still shows.
+        params = {"engine": "google", "q": q, "api_key": api_key, "start": start, "num": 10, "filter": 0}
         
         results = serp_search_with_retry(
             params,
@@ -1573,22 +1603,7 @@ def _serp_search_filetype_pages(q, domain, ext, api_key, max_results, sleep_s, u
             if not link:
                 continue
 
-            parsed = urlparse(link)
-            hostname = parsed.netloc.lower()
-
-            domain_lower = domain.lower().lstrip(".")
-
-            allowed_domain = (
-                hostname == domain_lower
-                or hostname.endswith("." + domain_lower)
-            )
-
-            allowed = (
-                allowed_domain
-                or bool(detect_platform(link))
-            )
-
-            if allowed:
+            if url_in_scope(link, domain):
                 urls.add(link)
 
         time.sleep(sleep_s)
