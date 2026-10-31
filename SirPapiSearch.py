@@ -1554,43 +1554,97 @@ def url_in_scope(url: str, domain: str) -> bool:
     return in_domain or bool(detect_platform(url))
 
 
+# Google returns a nondeterministic, clustered subset for site:filetype:
+# dorks and sometimes a transient empty page mid-sequence. Tolerate a
+# couple of empty pages once a scope has started yielding results, but
+# stop immediately if the very first page is empty (keeps quota low on
+# file types with nothing indexed).
+MAX_CONSECUTIVE_EMPTY_PAGES = 2
+
+
+def site_scope_variants(domain: str) -> list[str]:
+    """
+    apex/www pair to query for one target. Google returns different
+    subsets for site:example.com vs site:www.example.com, so querying
+    both and unioning widens coverage. Results are still scoped by the
+    caller's original domain via url_in_scope.
+    """
+    domain = domain.strip().lower().lstrip(".")
+
+    if domain.startswith("www."):
+        variants = [domain, domain[4:]]
+    else:
+        variants = [domain, "www." + domain]
+
+    seen = set()
+    return [d for d in variants if not (d in seen or seen.add(d))]
+
+
 def serp_search_filetype(domain: str, ext: str, api_key: str, max_results: int, sleep_s: float) -> set[str]:
-    q = f"site:{domain} filetype:{ext}"
     urls = set()
 
     try:
-        _serp_search_filetype_pages(q, domain, ext, api_key, max_results, sleep_s, urls)
+        for site_domain in site_scope_variants(domain):
+            _serp_search_filetype_pages(
+                site_domain, domain, ext, api_key, max_results, sleep_s, urls
+            )
     except KeyboardInterrupt:
         raise SearchInterrupted(urls)
 
     return urls
 
 
-def _serp_search_filetype_pages(q, domain, ext, api_key, max_results, sleep_s, urls: set[str]):
+def _serp_search_filetype_pages(site_domain, scope_domain, ext, api_key, max_results, sleep_s, urls: set[str]):
+    q = f"site:{site_domain} filetype:{ext}"
+    label = f"{ext} @ {site_domain}"
+
+    seen_any = False
+    consecutive_empty = 0
+
     for start in range(0, max_results, 10):
-        info(f"({ext}) Fetching results from offset {start}")
+        info(f"({label}) Fetching results from offset {start}")
         # filter=0 disables Google's "we omitted some very similar
         # results" dedup, which is aggressive on filetype: dorks and
         # otherwise hides indexed files the browser dork still shows.
         params = {"engine": "google", "q": q, "api_key": api_key, "start": start, "num": 10, "filter": 0}
-        
+
         results = serp_search_with_retry(
             params,
-            context=f"({ext}) offset {start}:",
+            context=f"({label}) offset {start}:",
         )
 
         if results is None:
             warning(
-                f"({ext}) Stopping search and preserving "
+                f"({label}) Stopping search and preserving "
                 f"results collected so far."
             )
             break
-        
+
         organic = results.get("organic_results", [])
-        
+
         if not organic:
-            notice(f"({ext}) No more results.")
-            break
+            # Nothing indexed for this scope/type at all.
+            if not seen_any:
+                notice(f"({label}) No results.")
+                break
+
+            # Transient gap mid-sequence: probe a little further before
+            # giving up, since Google's result set is nondeterministic.
+            consecutive_empty += 1
+            notice(
+                f"({label}) Empty result page at offset {start} "
+                f"({consecutive_empty}/{MAX_CONSECUTIVE_EMPTY_PAGES})."
+            )
+
+            if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES:
+                notice(f"({label}) No more results.")
+                break
+
+            time.sleep(sleep_s)
+            continue
+
+        seen_any = True
+        consecutive_empty = 0
 
         for r in organic:
             raw_link = (r.get("link") or "").strip()
@@ -1603,7 +1657,7 @@ def _serp_search_filetype_pages(q, domain, ext, api_key, max_results, sleep_s, u
             if not link:
                 continue
 
-            if url_in_scope(link, domain):
+            if url_in_scope(link, scope_domain):
                 urls.add(link)
 
         time.sleep(sleep_s)
