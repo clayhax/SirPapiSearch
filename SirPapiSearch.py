@@ -313,13 +313,83 @@ def clean_zoominfo_title_to_name(title: str) -> str:
 
     return t
 
-def get_profile_result_url(result: dict, profile_url_re: re.Pattern) -> str:
+def displayed_link_to_url(displayed: str) -> str:
+    """
+    Reconstruct a result URL from a SerpAPI `displayed_link`, e.g.
+    'https://www.linkedin.com › in › john-doe-50046a15' ->
+    'https://www.linkedin.com/in/john-doe-50046a15'.
+
+    Google wraps the real `link` in an opaque /goto or /url redirect that
+    can't be resolved offline, but displayed_link carries the true host
+    and path (with ' › ' separators) and is often the only usable source
+    of the destination. It may be truncated with an ellipsis, which is
+    fine for host/path recognition and dedup. Returns "" when the
+    displayed link isn't a URL.
+    """
+    d = (displayed or "").strip()
+    if not d:
+        return ""
+
+    d = d.replace("…", "")        # drop ellipsis char
+    d = d.replace("›", "/")       # ' › ' path separator -> '/'
+    d = re.sub(r"\s+", "", d)          # collapse the spaces around it
+    d = d.rstrip(".")                  # drop trailing '...'
+
+    if not d.lower().startswith(("http://", "https://")):
+        return ""
+
+    return d
+
+
+# LinkedIn breadcrumb sections that are not person profiles.
+_LINKEDIN_NON_PROFILE_SEGMENTS = {
+    "in", "jobs", "company", "school", "pulse", "posts", "feed",
+    "learning", "groups", "events", "showcase", "pub", "today",
+}
+
+
+def linkedin_displayed_to_url(displayed: str) -> str:
+    """
+    Rebuild a LinkedIn profile URL from a displayed_link breadcrumb.
+
+    Google renders a /in/ profile breadcrumb WITHOUT the 'in' segment,
+    e.g. 'https://uk.linkedin.com › johndoe' for
+    https://uk.linkedin.com/in/johndoe. Re-insert '/in/' so a single
+    bare slug is recognized as a profile, while section pages such as
+    'linkedin.com › jobs › ...' are rejected. Returns "" when it isn't a
+    LinkedIn profile breadcrumb.
+    """
+    url = displayed_link_to_url(displayed)
+    if not url:
+        return ""
+
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+
+    if not (host == "linkedin.com" or host.endswith(".linkedin.com")):
+        return ""
+
+    segments = [s for s in parsed.path.split("/") if s]
+
+    # Already a /in/<slug> breadcrumb: the generic form is usable as-is.
+    if segments and segments[0].lower() == "in":
+        return url
+
+    # A profile is a single bare slug; anything else is a section page.
+    if len(segments) == 1 and segments[0].lower() not in _LINKEDIN_NON_PROFILE_SEGMENTS:
+        return f"https://{host}/in/{segments[0]}"
+
+    return ""
+
+
+def get_profile_result_url(result: dict, source: "EmployeeSource") -> str:
     """
     Extract a profile URL matching profile_url_re from a SerpAPI result.
 
     Matches any subdomain, so country-specific LinkedIn hosts such as
     uk.linkedin.com or in.linkedin.com are supported.
     """
+    profile_url_re = source.profile_url_re
 
     # First check the normal result URL.
     link = unquote((result.get("link") or "").strip())
@@ -338,10 +408,20 @@ def get_profile_result_url(result: dict, profile_url_re: re.Pattern) -> str:
     if match:
         return match.group(0)
 
-    # Neither field was a direct profile URL. SerpAPI/Google
-    # sometimes returns an indirect /goto? redirect instead
-    # (the same quirk file search results have) — resolve it
-    # before giving up.
+    # Google now wraps `link` in an opaque /goto or /url redirect that
+    # can't be resolved offline, so the only reliable view of the true
+    # destination is displayed_link. A source may supply its own builder
+    # (LinkedIn's breadcrumb omits the /in/ segment); otherwise the host
+    # and path are taken verbatim.
+    builder = source.displayed_url_builder or displayed_link_to_url
+    displayed = builder(result.get("displayed_link"))
+
+    match = profile_url_re.search(displayed)
+    if match:
+        return match.group(0)
+
+    # Last resort: an indirect /goto? redirect we can still resolve over
+    # the network (older-style direct redirects only).
     resolved = resolve_serpapi_result_url(link)
 
     match = profile_url_re.search(resolved)
@@ -480,8 +560,7 @@ def parse_zoominfo_slug(link: str) -> tuple[str, str]:
 def company_pattern(company: str) -> re.Pattern:
     """
     Regex matching the company name with any spacing/punctuation between
-    its characters, so "FRSecure" also matches "FR Secure" and "AT&T"
-    matches "ATT".
+    its characters.
     """
     chars = normalize_for_email(company)
     return re.compile(r"[\W_]*".join(re.escape(c) for c in chars), re.IGNORECASE)
@@ -530,6 +609,17 @@ def mentions_company_as_employer(title: str, snippet: str, company_re: re.Patter
     return False
 
 
+def company_in_text(title: str, snippet: str, company_re: re.Pattern) -> bool:
+    """
+    Plain check that the company appears in the title or snippet. Right
+    for LinkedIn, whose snippet is the person's own bio/experience, so a
+    mention anywhere (including the start, e.g. 'Corp is an ...') is
+    a real signal. ZoomInfo needs the stricter sidebar-aware matcher
+    because its snippets list other people under the same company.
+    """
+    return bool(company_re.search(title) or company_re.search(snippet))
+
+
 @dataclass(frozen=True)
 class EmployeeSource:
     key: str
@@ -541,21 +631,33 @@ class EmployeeSource:
     non_person_re: re.Pattern        # rejects directory/company titles
     slug_is_name: bool = False       # URL slug is always the real name; prefer it on mismatch
     require_company_match: bool = False  # title/snippet must tie the person to the company
+    displayed_url_builder: "Callable[[str], str] | None" = None  # rebuild URL from displayed_link
+    # How title/snippet are checked against the company when filtering.
+    company_matcher: "Callable[[str, str, re.Pattern], bool]" = mentions_company_as_employer
 
 
 EMPLOYEE_SOURCES = {
     "linkedin": EmployeeSource(
         key="linkedin",
         label="LinkedIn",
-        query='site:linkedin.com/in/ "{company}"',
+        # Unquoted: quoting the company forces an exact-phrase match that
+        # Google answers with unrelated popular profiles (none mentioning
+        # the company). Unquoted returns the real employees; the
+        # require_company_match filter below keeps precision.
+        query="site:linkedin.com/in {company}",
         profile_url_re=_linkedin_profile_url_re,
         title_to_name=clean_linkedin_title_to_name,
         slug_to_name=parse_linkedin_slug,
         non_person_re=re.compile(r"\b(linkedin|profiles?|people)\b", re.IGNORECASE),
+        displayed_url_builder=linkedin_displayed_to_url,
+        require_company_match=True,
+        company_matcher=company_in_text,
     ),
     "zoominfo": EmployeeSource(
         key="zoominfo",
         label="ZoomInfo",
+        # Kept quoted: unquoting collapsed ZoomInfo recognition to zero
+        # (unlike LinkedIn). ZoomInfo precision/recall is a separate TODO.
         query='site:zoominfo.com/p/ "{company}"',
         profile_url_re=_zoominfo_profile_url_re,
         title_to_name=clean_zoominfo_title_to_name,
@@ -686,7 +788,7 @@ def search_employee_names(
             for r in organic:
                 raw_results += 1
 
-                link = get_profile_result_url(r, source.profile_url_re)
+                link = get_profile_result_url(r, source)
                 title = (r.get("title") or "").strip()
                 snippet = (r.get("snippet") or "").strip()
 
@@ -706,7 +808,7 @@ def search_employee_names(
                 if (
                     company_filter
                     and source.require_company_match
-                    and not mentions_company_as_employer(title, snippet, company_re)
+                    and not source.company_matcher(title, snippet, company_re)
                 ):
                     off_company += 1
                     continue
